@@ -1,0 +1,8 @@
+device: "cuda"  # Use "cuda" for GPU, "mps" for Mac, or "cpu"
+image_directory: "../data/iphone_example_data/"
+left_crop: 0
+right_crop: 0
+top_crop: 0
+bottom_crop: 0
+fixed_height: 768
+fixed_width: 1024
