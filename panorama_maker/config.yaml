@@ -1,8 +1,13 @@
 device: "cuda"  # Use "cuda" for GPU, "mps" for Mac, or "cpu"
-image_directory: "../data/iphone_example_data/"
-left_crop: 0
-right_crop: 0
-top_crop: 0
-bottom_crop: 0
+image_directory: "../data/camB/"
+save_image: True
+output_dir: "../output"
+output_filename: "T4_bean_camB.png"
+batch_size: 50
+max_workers: 8
+left_crop: 300
+right_crop: 300
+top_crop: 100
+bottom_crop: 100
 fixed_height: 768
 fixed_width: 1024

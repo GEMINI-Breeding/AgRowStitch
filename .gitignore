@@ -166,3 +166,6 @@ build
 output
 LightGlue
 test_env
+camB
+camB_small
+.DS_Store
