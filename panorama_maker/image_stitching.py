@@ -1,6 +1,3 @@
-# image_stitching.py
-
-import gc
 import cv2
 import os
 import glob
@@ -8,11 +5,11 @@ import re
 import yaml
 import torch
 import numpy as np
-from lightglue import LightGlue, SuperPoint
+from lightglue import LightGlue, SuperPoint, ALIKED
 from lightglue.utils import rbd
 from torchvision import transforms
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 def load_config(config_path):
     """Load configuration from a YAML file and compile regex patterns."""
@@ -54,34 +51,6 @@ def extract_timestamp(filename):
         return int(match.group(1))
     return None
 
-def process_image_batch(image_paths, config, batch_idx):
-    """Process a batch of images using multithreading, extract features, and manage memory efficiently."""
-    original_images = []
-    original_sizes = []
-    feats_list = []
-
-    def process_and_track(path, index):
-        print(f"Batch {batch_idx + 1}: Processing image {index + 1}/{len(image_paths)} - {path}")
-        image_tensor, size, feats = process_image(path, config)
-        return (image_tensor, size, feats, index)
-
-    # Using ThreadPoolExecutor for parallel processing
-    with ThreadPoolExecutor(max_workers=config.get('max_workers', 4)) as executor:
-        futures = {executor.submit(process_and_track, path, i): i for i, path in enumerate(image_paths)}
-        for future in as_completed(futures):
-            image_tensor, size, feats, idx = future.result()
-            if image_tensor is not None:
-                original_images.append(image_tensor)
-                original_sizes.append(size)
-                feats_list.append(feats)
-            # Clear the image tensor from GPU memory if using CUDA
-            del image_tensor, feats
-            torch.cuda.empty_cache()
-
-    return original_images, original_sizes, feats_list
-
-
-
 def process_image(path, config):
     """Load, crop, resize, and extract features from an image."""
     image_cv = cv2.imread(path)
@@ -105,7 +74,13 @@ def process_image(path, config):
     image_resized_tensor = transforms.ToTensor()(image_resized).to(config["device"]).unsqueeze(0)
 
     # Extract features
-    extractor = SuperPoint(max_num_keypoints=2048).eval().to(config["device"])
+    if config['extractor'] == 'superpoint':
+        print('Using SuperPoint for feature extraction')
+        extractor = SuperPoint(max_num_keypoints=2048).eval().to(config["device"])
+    if config['extractor'] == 'aliked':
+        print('Using ALIKED for feature extraction')
+        extractor = ALIKED(max_num_keypoints=2048).eval().to(config["device"])
+
     with torch.no_grad():
         feats = extractor.extract(image_resized_tensor)
         feats['keypoints'] = feats['keypoints'].unsqueeze(0)
@@ -127,7 +102,9 @@ def match_keypoints(feats_list, original_sizes, config):
     """Match keypoints between consecutive images and estimate transformations."""
     print(f"Matching keypoints for {len(feats_list)} images...")
     
-    matcher = LightGlue(features="superpoint").eval().to(config["device"])
+    # Define matching network
+    matcher = LightGlue(features=config['extractor']).eval().to(config["device"])
+
     accumulated_H = np.eye(3)
     transformations = [accumulated_H.copy()]
     all_corners = []
@@ -142,6 +119,7 @@ def match_keypoints(feats_list, original_sizes, config):
         matches_input = {"image0": feats0, "image1": feats1}
         matches01 = matcher(matches_input)
         matches01_rbd = rbd(matches01)
+        print('matches01', matches01)
 
         kpts0 = feats0["keypoints"].squeeze(0)
         kpts1 = feats1["keypoints"].squeeze(0)
@@ -174,7 +152,7 @@ def match_keypoints(feats_list, original_sizes, config):
         m_kpts1_np = m_kpts1_orig.cpu().numpy()
 
         if len(m_kpts0_np) >= 3:
-            H_affine, inliers = cv2.estimateAffinePartial2D(m_kpts1_np, m_kpts0_np, method=cv2.RANSAC)
+            H_affine, inliers = cv2.estimateAffinePartial2D(m_kpts1_np, m_kpts0_np, method=cv2.RANSAC) #can also be 'LMEDS'
             if H_affine is not None:
                 H = np.vstack([H_affine, [0, 0, 1]])
                 accumulated_H = accumulated_H @ H
@@ -241,47 +219,39 @@ def stitch_images(original_images, transformations, all_corners):
     print("Stitching completed.")
     return panorama
 
-def run_stitching_pipeline(config_path):
+def run_stitching_pipeline(config_path, save_img=False):
     """Run the complete stitching pipeline with configuration from a YAML file."""
     print("Running image stitching pipeline...")
     config = load_config(config_path)
     image_paths = get_image_paths(config)
-    
-    batch_size = config.get('batch_size', 50)  # Default batch size if not set
-    num_batches = (len(image_paths) + batch_size - 1) // batch_size
-    
-    all_transformations = []
-    all_corners = []
-    panorama = None
 
-    for batch_idx in range(num_batches):
-        start_idx = batch_idx * batch_size
-        end_idx = min(start_idx + batch_size, len(image_paths))
-        batch_paths = image_paths[start_idx:end_idx]
+    print("Processing images...")
+    total_images = len(image_paths)
+    processed_count = 0
 
-        print(f"Processing batch {batch_idx + 1}/{num_batches} with images {start_idx + 1} to {end_idx}...")
-        original_images, original_sizes, feats_list = process_image_batch(batch_paths, config, batch_idx)
+    original_images = []
+    original_sizes = []
+    feats_list = []
 
-        if len(feats_list) > 1:
-            print(f"Batch {batch_idx + 1}: Matching keypoints and estimating transformations...")
-            transformations, batch_corners = match_keypoints(feats_list, original_sizes, config)
-            all_transformations.extend(transformations)
-            all_corners.extend(batch_corners)
+    with ThreadPoolExecutor() as executor:
+        results = executor.map(lambda path: process_image(path, config), image_paths)
 
-        # Clear memory after processing each batch
-        del original_images, original_sizes, feats_list
-        torch.cuda.empty_cache()
-        gc.collect()
+    for image_tensor, size, feats in results:
+        processed_count += 1
+        print(f"Processed {processed_count}/{total_images} images.")
+        if image_tensor is not None:
+            original_images.append(image_tensor)
+            original_sizes.append(size)
+            feats_list.append(feats)
 
-    # Stitch images in a separate step after all transformations are accumulated
-    if all_transformations and all_corners:
-        print("Stitching images into a panorama...")
-        panorama = stitch_images([None] * len(all_transformations), all_transformations, all_corners)
+    print("Matching keypoints and estimating transformations...")
+    transformations, all_corners = match_keypoints(feats_list, original_sizes, config)
+    panorama = stitch_images(original_images, transformations, all_corners)
+    print("Pipeline completed.")
 
     if config['save_image']:
         cv2.imwrite(os.path.join(config['output_dir'], config['output_filename']), panorama)
 
-    print("Pipeline completed.")
     return panorama
 
 # Use this guard to prevent auto-execution when imported
