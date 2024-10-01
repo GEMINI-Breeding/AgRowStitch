@@ -2,7 +2,7 @@ device: "cuda"  # Use "cuda" for GPU, "mps" for Mac, or "cpu"
 image_directory: "../data/camB_smallest_subset/"
 save_image: True
 output_dir: "../output"
-output_filename: "camB_smallest_subset_ransac.png"
+output_filename: "camB_smallest_subset_test2_xy_scale.png"
 batch_size: 50
 max_workers: 8
 left_crop: 300
@@ -13,3 +13,4 @@ fixed_height: 768
 fixed_width: 1024
 extractor: 'superpoint'
 H_transform_method: 'RANSAC' # 'LMEDS'
+pts_transformation: 'xy_scale' # 'y', 'xy', 'xy_scale', 'xy_rot_scale', 'xy_rot_shear_scale2'

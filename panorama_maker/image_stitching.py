@@ -98,6 +98,48 @@ def tensor_to_image(tensor):
     return image
 
 
+def estimateTranslationY(srcPoints, dstPoints):
+    # No translation along the x-axis
+    T_x = 0  # Fixed at zero
+
+    # Calculate the mean difference along the y-axis
+    T_y = np.mean(dstPoints[:, 1] - srcPoints[:, 1])
+
+    # Create the 2x3 affine translation matrix with translation only along y-axis
+    translation_matrix = np.array([[1, 0, T_x],
+                                   [0, 1, T_y]], dtype=np.float32)
+
+    return translation_matrix
+
+def estimateTranslation2D(srcPoints, dstPoints):
+    # Calculate the mean difference between corresponding points
+    T_x = np.mean(dstPoints[:, 0] - srcPoints[:, 0])
+    T_y = np.mean(dstPoints[:, 1] - srcPoints[:, 1])
+
+    # Create the 2x3 affine translation matrix
+    translation_matrix = np.array([[1, 0, T_x],
+                                   [0, 1, T_y]], dtype=np.float32)
+
+    return translation_matrix
+
+def estimateTranslationAndScale(srcPoints, dstPoints):
+    # Calculate the translation components
+    T_x = np.mean(dstPoints[:, 0] - srcPoints[:, 0])
+    T_y = np.mean(dstPoints[:, 1] - srcPoints[:, 1])
+
+    # Calculate the uniform scale (mean ratio of distances between corresponding points)
+    src_distances = np.linalg.norm(srcPoints - np.mean(srcPoints, axis=0), axis=1)
+    dst_distances = np.linalg.norm(dstPoints - np.mean(dstPoints, axis=0), axis=1)
+    
+    # Uniform scale factor is the ratio of destination distances to source distances
+    S = np.mean(dst_distances / src_distances)
+
+    # Create the 2x3 affine matrix with translation and uniform scale
+    transformation_matrix = np.array([[S, 0, T_x],
+                                      [0, S, T_y]], dtype=np.float32)
+
+    return transformation_matrix
+
 def match_keypoints(feats_list, original_sizes, config):
     """Match keypoints between consecutive images and estimate transformations."""
     print(f"Matching keypoints for {len(feats_list)} images...")
@@ -119,7 +161,6 @@ def match_keypoints(feats_list, original_sizes, config):
         matches_input = {"image0": feats0, "image1": feats1}
         matches01 = matcher(matches_input)
         matches01_rbd = rbd(matches01)
-        print('matches01', matches01)
 
         kpts0 = feats0["keypoints"].squeeze(0)
         kpts1 = feats1["keypoints"].squeeze(0)
@@ -152,7 +193,18 @@ def match_keypoints(feats_list, original_sizes, config):
         m_kpts1_np = m_kpts1_orig.cpu().numpy()
 
         if len(m_kpts0_np) >= 3:
-            H_affine, inliers = cv2.estimateAffinePartial2D(m_kpts1_np, m_kpts0_np, method=cv2.RANSAC) #can also be 'LMEDS'
+
+            if config['pts_transformation'] == 'y':
+                H_affine = estimateTranslationY(m_kpts1_np, m_kpts0_np)
+            if config['pts_transformation'] == 'xy':
+                H_affine = estimateTranslation2D(m_kpts1_np, m_kpts0_np)
+            if config['pts_transformation'] == 'xy_scale':
+                H_affine = estimateTranslationAndScale(m_kpts1_np, m_kpts0_np)
+            if config['pts_transformation'] == 'xy_rot_scale':
+                H_affine, _ = cv2.estimateAffinePartial2D(m_kpts1_np, m_kpts0_np, method=cv2.RANSAC) #can also be 'LMEDS'
+            if config['pts_transformation'] == 'xy_rot_shear_scale2':
+                H_affine, _ = cv2.estimateAffine2D(m_kpts1_np, m_kpts0_np, method=cv2.RANSAC) #can also be 'LMEDS'
+            
             if H_affine is not None:
                 H = np.vstack([H_affine, [0, 0, 1]])
                 accumulated_H = accumulated_H @ H
