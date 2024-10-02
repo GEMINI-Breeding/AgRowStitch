@@ -169,5 +169,5 @@ test_env
 camB
 camB_small
 .DS_Store
-camB_small_subset
-camB_smallest_subset
+data/*
+!data/iphone_example_data

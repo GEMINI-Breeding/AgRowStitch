@@ -1,16 +1,16 @@
 device: "cuda"  # Use "cuda" for GPU, "mps" for Mac, or "cpu"
-image_directory: "../data/camB_smallest_subset/"
+image_directory: "../data/local-kramlich-images/"
 save_image: True
 output_dir: "../output"
-output_filename: "camB_smallest_subset_test2_xy_scale.png"
+output_filename: "grape_2daffine_xy.png"
 batch_size: 50
 max_workers: 8
-left_crop: 300
-right_crop: 300
-top_crop: 50
+left_crop: 0
+right_crop: 0
+top_crop: 0
 bottom_crop: 50
 fixed_height: 768
 fixed_width: 1024
 extractor: 'superpoint'
 H_transform_method: 'RANSAC' # 'LMEDS'
-pts_transformation: 'xy_scale' # 'y', 'xy', 'xy_scale', 'xy_rot_scale', 'xy_rot_shear_scale2'
+pts_transformation: 'translation_x' # 'translation_x', 'translation_y', 'translation_2d', 'translation_scale', 'rotation_translation', 'affine_partial', 'affine_full'

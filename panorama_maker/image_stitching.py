@@ -97,47 +97,116 @@ def tensor_to_image(tensor):
     image = (image * 255).astype(np.uint8)
     return image
 
+import numpy as np
+import cv2  # Make sure you have OpenCV installed
 
-def estimateTranslationY(srcPoints, dstPoints):
-    # No translation along the x-axis
-    T_x = 0  # Fixed at zero
-
-    # Calculate the mean difference along the y-axis
-    T_y = np.mean(dstPoints[:, 1] - srcPoints[:, 1])
-
-    # Create the 2x3 affine translation matrix with translation only along y-axis
-    translation_matrix = np.array([[1, 0, T_x],
-                                   [0, 1, T_y]], dtype=np.float32)
-
-    return translation_matrix
-
-def estimateTranslation2D(srcPoints, dstPoints):
-    # Calculate the mean difference between corresponding points
-    T_x = np.mean(dstPoints[:, 0] - srcPoints[:, 0])
-    T_y = np.mean(dstPoints[:, 1] - srcPoints[:, 1])
-
-    # Create the 2x3 affine translation matrix
-    translation_matrix = np.array([[1, 0, T_x],
-                                   [0, 1, T_y]], dtype=np.float32)
-
-    return translation_matrix
-
-def estimateTranslationAndScale(srcPoints, dstPoints):
-    # Calculate the translation components
-    T_x = np.mean(dstPoints[:, 0] - srcPoints[:, 0])
-    T_y = np.mean(dstPoints[:, 1] - srcPoints[:, 1])
-
-    # Calculate the uniform scale (mean ratio of distances between corresponding points)
-    src_distances = np.linalg.norm(srcPoints - np.mean(srcPoints, axis=0), axis=1)
-    dst_distances = np.linalg.norm(dstPoints - np.mean(dstPoints, axis=0), axis=1)
+def estimateTransformation(srcPoints, dstPoints, mode='translation_2d'):
+    """
+    Estimates a transformation matrix based on the given mode.
     
-    # Uniform scale factor is the ratio of destination distances to source distances
-    S = np.mean(dst_distances / src_distances)
+    Modes:
+    - 'translation_x': Translation only along the x-axis
+    - 'translation_y': Translation only along the y-axis.
+    - 'translation_2d': Translation in both x and y directions.
+    - 'translation_scale': Translation and uniform scaling.
+    - 'rotation_translation': Rotation and translation.
+    - 'affine_partial': Equivalent to OpenCV's estimateAffinePartial2D.
+    - 'affine_full': Equivalent to OpenCV's estimateAffine2D.
+    
+    Parameters:
+    - srcPoints: Source points (Nx2 array).
+    - dstPoints: Destination points (Nx2 array).
+    - mode: The transformation type.
+    
+    Returns:
+    - A 2x3 transformation matrix.
+    """
+    
+    if mode == 'translation_y':
+        # No translation along the x-axis
+        T_y = 0  # Fixed at zero
+        # Calculate the mean difference along the y-axis
+        T_x = np.mean(dstPoints[:, 1] - srcPoints[:, 1])
+        # Translation along y only
+        transformation_matrix = np.array([[1, 0, T_x],
+                                          [0, 1, T_y]], dtype=np.float32)
+    
+    if mode == 'translation_x':
+        # No translation along the y-axis
+        T_y = 0  # Fixed at zero
+        # Calculate the mean difference along the x-axis
+        T_x = np.mean(dstPoints[:, 0] - srcPoints[:, 0])
+        # Translation along x only
+        transformation_matrix = np.array([[1, 0, T_x],
+                                        [0, 1, T_y]], dtype=np.float32)
+    
+    elif mode == 'translation_2d':
+        # Calculate the translation components in both x and y
+        T_x = np.mean(dstPoints[:, 0] - srcPoints[:, 0])
+        T_y = np.mean(dstPoints[:, 1] - srcPoints[:, 1])
+        # Translation in 2D
+        transformation_matrix = np.array([[1, 0, T_x],
+                                          [0, 1, T_y]], dtype=np.float32)
+    
+    elif mode == 'translation_scale':
+        # Calculate the translation components
+        T_x = np.mean(dstPoints[:, 0] - srcPoints[:, 0])
+        T_y = np.mean(dstPoints[:, 1] - srcPoints[:, 1])
+        
+        # Calculate the uniform scale (mean ratio of distances between corresponding points)
+        src_distances = np.linalg.norm(srcPoints - np.mean(srcPoints, axis=0), axis=1)
+        dst_distances = np.linalg.norm(dstPoints - np.mean(dstPoints, axis=0), axis=1)
+        # Uniform scale factor
+        S = np.mean(dst_distances / src_distances)
+        
+        # Translation + uniform scaling
+        transformation_matrix = np.array([[S, 0, T_x],
+                                          [0, S, T_y]], dtype=np.float32)
+    
+    elif mode == 'rotation_translation':
+        # Compute centroids of source and destination points
+        src_center = np.mean(srcPoints, axis=0)
+        dst_center = np.mean(dstPoints, axis=0)
 
-    # Create the 2x3 affine matrix with translation and uniform scale
-    transformation_matrix = np.array([[S, 0, T_x],
-                                      [0, S, T_y]], dtype=np.float32)
+        # Subtract centroids from points
+        src_points_centered = srcPoints - src_center
+        dst_points_centered = dstPoints - dst_center
 
+        # Compute rotation matrix using Singular Value Decomposition (SVD)
+        U, _, Vt = np.linalg.svd(np.dot(dst_points_centered.T, src_points_centered))
+        R = np.dot(U, Vt)
+        
+        # Handle potential reflection caused by the determinant of rotation matrix
+        if np.linalg.det(R) < 0:
+            Vt[1, :] *= -1
+            R = np.dot(U, Vt)
+
+        # Extract rotation parameters
+        T_x = dst_center[0] - np.dot(src_center, R)[0]
+        T_y = dst_center[1] - np.dot(src_center, R)[1]
+
+        # Create 2x3 affine transformation matrix with rotation and translation
+        transformation_matrix = np.array([[R[0, 0], R[0, 1], T_x],
+                                          [R[1, 0], R[1, 1], T_y]], dtype=np.float32)
+    
+    elif mode == 'affine_partial':  # Use OpenCV's estimateAffinePartial2D
+        # Estimate the affine transformation matrix using OpenCV's method
+        transformation_matrix, _ = cv2.estimateAffinePartial2D(srcPoints, dstPoints)
+        if transformation_matrix is None:
+            raise ValueError("Could not estimate affine partial transformation")
+    
+    elif mode == 'affine_full':  # Use OpenCV's estimateAffine2D
+        # Estimate the full affine transformation matrix using OpenCV's method
+        transformation_matrix, _ = cv2.estimateAffine2D(srcPoints, dstPoints)
+        if transformation_matrix is None:
+            raise ValueError("Could not estimate full affine transformation")
+
+    else:
+        raise ValueError("Unknown mode. Supported modes are 'translation_y', 'translation_2d', 'translation_scale', 'rotation_translation', 'affine_partial', and 'affine_full'.")
+    
+    return transformation_matrix
+
+    
     return transformation_matrix
 
 def match_keypoints(feats_list, original_sizes, config):
@@ -194,17 +263,8 @@ def match_keypoints(feats_list, original_sizes, config):
 
         if len(m_kpts0_np) >= 3:
 
-            if config['pts_transformation'] == 'y':
-                H_affine = estimateTranslationY(m_kpts1_np, m_kpts0_np)
-            if config['pts_transformation'] == 'xy':
-                H_affine = estimateTranslation2D(m_kpts1_np, m_kpts0_np)
-            if config['pts_transformation'] == 'xy_scale':
-                H_affine = estimateTranslationAndScale(m_kpts1_np, m_kpts0_np)
-            if config['pts_transformation'] == 'xy_rot_scale':
-                H_affine, _ = cv2.estimateAffinePartial2D(m_kpts1_np, m_kpts0_np, method=cv2.RANSAC) #can also be 'LMEDS'
-            if config['pts_transformation'] == 'xy_rot_shear_scale2':
-                H_affine, _ = cv2.estimateAffine2D(m_kpts1_np, m_kpts0_np, method=cv2.RANSAC) #can also be 'LMEDS'
-            
+            H_affine = estimateTransformation(m_kpts1_np, m_kpts0_np, mode=config['pts_transformation'])
+
             if H_affine is not None:
                 H = np.vstack([H_affine, [0, 0, 1]])
                 accumulated_H = accumulated_H @ H
