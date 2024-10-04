@@ -1,8 +1,9 @@
 device: "cuda"  # Use "cuda" for GPU, "mps" for Mac, or "cpu"
-image_directory: "../data/local-kramlich-images/"
+image_directory: "../data/kramlich-subset/rgb"
+depth_directory: "../data/kramlich-subset/depth"
 save_image: True
 output_dir: "../output"
-output_filename: "grape_2daffine_xy.png"
+output_filename: "grape_xtrans_expdecay.png"
 batch_size: 50
 max_workers: 8
 left_crop: 0
