@@ -4,6 +4,8 @@ import glob
 import re
 import yaml
 import torch
+import numba
+from numba import jit
 import numpy as np
 from lightglue import LightGlue, SuperPoint, ALIKED
 from lightglue.utils import rbd
@@ -100,6 +102,9 @@ def tensor_to_image(tensor):
 import numpy as np
 import cv2  # Make sure you have OpenCV installed
 
+import cv2
+import numpy as np
+
 def estimateTransformation(srcPoints, dstPoints, mode='translation_2d'):
     """
     Estimates a transformation matrix based on the given mode.
@@ -112,6 +117,7 @@ def estimateTransformation(srcPoints, dstPoints, mode='translation_2d'):
     - 'rotation_translation': Rotation and translation.
     - 'affine_partial': Equivalent to OpenCV's estimateAffinePartial2D.
     - 'affine_full': Equivalent to OpenCV's estimateAffine2D.
+    - 'homography': Full homography transformation.
     
     Parameters:
     - srcPoints: Source points (Nx2 array).
@@ -119,104 +125,100 @@ def estimateTransformation(srcPoints, dstPoints, mode='translation_2d'):
     - mode: The transformation type.
     
     Returns:
-    - A 2x3 transformation matrix.
+    - A 3x3 transformation matrix.
     """
     
     if mode == 'translation_y':
-        # No translation along the x-axis
-        T_y = 0  # Fixed at zero
-        # Calculate the mean difference along the y-axis
-        T_x = np.mean(dstPoints[:, 1] - srcPoints[:, 1])
-        # Translation along y only
+        T_x = 0
+        T_y = np.mean(dstPoints[:, 1] - srcPoints[:, 1])
+        # Create 3x3 homogeneous matrix for translation along y
         transformation_matrix = np.array([[1, 0, T_x],
-                                          [0, 1, T_y]], dtype=np.float32)
+                                          [0, 1, T_y],
+                                          [0, 0, 1]], dtype=np.float32)
     
-    if mode == 'translation_x':
-        # No translation along the y-axis
-        T_y = 0  # Fixed at zero
-        # Calculate the mean difference along the x-axis
+    elif mode == 'translation_x':
         T_x = np.mean(dstPoints[:, 0] - srcPoints[:, 0])
-        # Translation along x only
+        T_y = 0
+        # Create 3x3 homogeneous matrix for translation along x
         transformation_matrix = np.array([[1, 0, T_x],
-                                        [0, 1, T_y]], dtype=np.float32)
+                                          [0, 1, T_y],
+                                          [0, 0, 1]], dtype=np.float32)
     
     elif mode == 'translation_2d':
-        # Calculate the translation components in both x and y
         T_x = np.mean(dstPoints[:, 0] - srcPoints[:, 0])
         T_y = np.mean(dstPoints[:, 1] - srcPoints[:, 1])
-        # Translation in 2D
+        # Create 3x3 homogeneous matrix for 2D translation
         transformation_matrix = np.array([[1, 0, T_x],
-                                          [0, 1, T_y]], dtype=np.float32)
+                                          [0, 1, T_y],
+                                          [0, 0, 1]], dtype=np.float32)
     
     elif mode == 'translation_scale':
-        # Calculate the translation components
         T_x = np.mean(dstPoints[:, 0] - srcPoints[:, 0])
         T_y = np.mean(dstPoints[:, 1] - srcPoints[:, 1])
         
-        # Calculate the uniform scale (mean ratio of distances between corresponding points)
         src_distances = np.linalg.norm(srcPoints - np.mean(srcPoints, axis=0), axis=1)
         dst_distances = np.linalg.norm(dstPoints - np.mean(dstPoints, axis=0), axis=1)
-        # Uniform scale factor
         S = np.mean(dst_distances / src_distances)
         
-        # Translation + uniform scaling
         transformation_matrix = np.array([[S, 0, T_x],
-                                          [0, S, T_y]], dtype=np.float32)
+                                          [0, S, T_y],
+                                          [0, 0, 1]], dtype=np.float32)
     
     elif mode == 'rotation_translation':
-        # Compute centroids of source and destination points
         src_center = np.mean(srcPoints, axis=0)
         dst_center = np.mean(dstPoints, axis=0)
 
-        # Subtract centroids from points
         src_points_centered = srcPoints - src_center
         dst_points_centered = dstPoints - dst_center
 
-        # Compute rotation matrix using Singular Value Decomposition (SVD)
         U, _, Vt = np.linalg.svd(np.dot(dst_points_centered.T, src_points_centered))
         R = np.dot(U, Vt)
-        
-        # Handle potential reflection caused by the determinant of rotation matrix
+
         if np.linalg.det(R) < 0:
             Vt[1, :] *= -1
             R = np.dot(U, Vt)
 
-        # Extract rotation parameters
         T_x = dst_center[0] - np.dot(src_center, R)[0]
         T_y = dst_center[1] - np.dot(src_center, R)[1]
 
-        # Create 2x3 affine transformation matrix with rotation and translation
         transformation_matrix = np.array([[R[0, 0], R[0, 1], T_x],
-                                          [R[1, 0], R[1, 1], T_y]], dtype=np.float32)
+                                          [R[1, 0], R[1, 1], T_y],
+                                          [0, 0, 1]], dtype=np.float32)
     
-    elif mode == 'affine_partial':  # Use OpenCV's estimateAffinePartial2D
-        # Estimate the affine transformation matrix using OpenCV's method
+    elif mode == 'affine_partial':
         transformation_matrix, _ = cv2.estimateAffinePartial2D(srcPoints, dstPoints)
         if transformation_matrix is None:
             raise ValueError("Could not estimate affine partial transformation")
+        # Convert to 3x3 matrix
+        transformation_matrix = np.vstack([transformation_matrix, [0, 0, 1]])
     
-    elif mode == 'affine_full':  # Use OpenCV's estimateAffine2D
-        # Estimate the full affine transformation matrix using OpenCV's method
+    elif mode == 'affine_full':
         transformation_matrix, _ = cv2.estimateAffine2D(srcPoints, dstPoints)
         if transformation_matrix is None:
             raise ValueError("Could not estimate full affine transformation")
-
+        # Convert to 3x3 matrix
+        transformation_matrix = np.vstack([transformation_matrix, [0, 0, 1]])
+    
+    elif mode == 'homography':
+        transformation_matrix, _ = cv2.findHomography(srcPoints, dstPoints, cv2.RANSAC)
+        if transformation_matrix is None:
+            raise ValueError("Could not estimate homography transformation")
+    
     else:
-        raise ValueError("Unknown mode. Supported modes are 'translation_y', 'translation_2d', 'translation_scale', 'rotation_translation', 'affine_partial', and 'affine_full'.")
+        raise ValueError("Unknown mode. Supported modes are 'translation_y', 'translation_x', 'translation_2d', 'translation_scale', 'rotation_translation', 'affine_partial', 'affine_full', 'homography'.")
     
     return transformation_matrix
 
-    
-    return transformation_matrix
 
 def match_keypoints(feats_list, original_sizes, config):
     """Match keypoints between consecutive images and estimate transformations."""
     print(f"Matching keypoints for {len(feats_list)} images...")
-    
+
     # Define matching network
     matcher = LightGlue(features=config['extractor']).eval().to(config["device"])
 
-    accumulated_H = np.eye(3)
+    # Initialize accumulated transformation matrix as 3x3 identity matrix
+    accumulated_H = np.eye(3, dtype=np.float32)
     transformations = [accumulated_H.copy()]
     all_corners = []
 
@@ -226,6 +228,7 @@ def match_keypoints(feats_list, original_sizes, config):
     for i in range(1, len(feats_list)):
         match_count += 1
         print(f"Matching keypoints between image {i - 1} and image {i} ({match_count}/{total_matches})")
+
         feats0, feats1 = feats_list[i - 1], feats_list[i]
         matches_input = {"image0": feats0, "image1": feats1}
         matches01 = matcher(matches_input)
@@ -262,30 +265,70 @@ def match_keypoints(feats_list, original_sizes, config):
         m_kpts1_np = m_kpts1_orig.cpu().numpy()
 
         if len(m_kpts0_np) >= 3:
+            # Estimate the transformation matrix based on the configuration mode
+            H_estimated = estimateTransformation(m_kpts1_np, m_kpts0_np, mode=config['pts_transformation'])
 
-            H_affine = estimateTransformation(m_kpts1_np, m_kpts0_np, mode=config['pts_transformation'])
+            if H_estimated is not None:
+                # Convert to 3x3 if it's a 2x3 affine transformation
+                if H_estimated.shape == (2, 3):
+                    H = np.vstack([H_estimated, [0, 0, 1]])
+                else:
+                    H = H_estimated  # For homography or other 3x3 matrices
 
-            if H_affine is not None:
-                H = np.vstack([H_affine, [0, 0, 1]])
+                # Accumulate the transformation
                 accumulated_H = accumulated_H @ H
                 transformations.append(accumulated_H.copy())
 
+                # Update corners for the transformed image
                 hi, wi = original_sizes[i]
                 corners_i = np.array([[0, 0], [0, hi], [wi, hi], [wi, 0]], dtype=np.float32)
-                rotation_translation = accumulated_H[:2, :]
-                corners_i_transformed = cv2.transform(corners_i.reshape(-1, 1, 2), rotation_translation)
+                corners_i_transformed = cv2.perspectiveTransform(corners_i.reshape(-1, 1, 2), accumulated_H)
                 all_corners.append(corners_i_transformed.reshape(-1, 2))
+
                 print(f"Transformation found between image {i - 1} and image {i}.")
             else:
-                print(f"Transformation failed between image {i-1} and image {i}.")
+                print(f"Transformation failed between image {i - 1} and image {i}.")
         else:
-            print(f"Not enough matches between image {i-1} and image {i}.")
+            print(f"Not enough matches between image {i - 1} and image {i}.")
 
     return transformations, all_corners
 
+import cv2
+import numpy as np
+from numba import jit
+
+@jit(nopython=True)
+def blend_regions(panorama, warped_image, weight_map, mask_overlap, valid_overlap, mask_non_overlap):
+    """Blend the overlapping and non-overlapping regions using Numba for speedup."""
+    # Smoothly blend overlapping regions using the Gaussian weight map
+    for y in range(panorama.shape[0]):
+        for x in range(panorama.shape[1]):
+            if valid_overlap[y, x]:
+                for c in range(3):  # Iterate over each color channel (R, G, B)
+                    panorama[y, x, c] = (weight_map[y, x, c] * warped_image[y, x, c] +
+                                         (1 - weight_map[y, x, c]) * panorama[y, x, c])
+            elif mask_non_overlap[y, x]:
+                for c in range(3):
+                    panorama[y, x, c] = warped_image[y, x, c]
+
+    return panorama
+
+import time
+
+def apply_box_blur_multiple_passes(image, kernel_size, passes=3):
+    """Apply multiple passes of a box filter to approximate Gaussian blur."""
+    blurred = image.copy()
+    for _ in range(passes):
+        blurred = cv2.boxFilter(blurred, -1, (kernel_size, kernel_size))
+    return blurred
+
 def stitch_images(original_images, transformations, all_corners):
-    """Stitch images together into a panorama using original blending logic."""
+    """Stitch images together into a panorama using box filter approximation for smoother transitions."""
     print("Starting stitching of images...")
+    
+    # Start overall timer
+    start_time = time.time()
+    
     all_corners = np.vstack(all_corners)
     x_min, y_min = np.int32(all_corners.min(axis=0) - 0.5)
     x_max, y_max = np.int32(all_corners.max(axis=0) + 0.5)
@@ -301,35 +344,116 @@ def stitch_images(original_images, transformations, all_corners):
                             [0, 0, 1]])
 
     # Initialize the panorama and mask
-    panorama = np.zeros((panorama_height, panorama_width, 3), dtype=np.uint8)
+    panorama = np.full((panorama_height, panorama_width, 3), -1, dtype=np.float32)
     mask_panorama = np.zeros((panorama_height, panorama_width), dtype=np.uint8)
 
-    # Warp and blend each image using the original blending logic
+    # Baseline kernel size ratio for Gaussian blur (tunable)
+    base_kernel_ratio = 0.163  # Derived value for optimal blending based on image size
+
+    # Start processing each image
     for i in range(len(original_images)):
         stitch_count += 1
         print(f"Stitching image {stitch_count}/{total_stitching}")
 
+        # Start time for each image stitching
+        image_start_time = time.time()
+
         H = transformations[i]
-        # Compute the total transformation
         H_total = translation @ H
 
-        # Warp the image
+        # Time warp operation
+        warp_start = time.time()
+        # Warp the image using nearest neighbor interpolation to avoid new artifacts
         image_i_np = tensor_to_image(original_images[i])
-        warped_image_i = cv2.warpPerspective(image_i_np, H_total, (panorama_width, panorama_height))
+        warped_image_i = cv2.warpPerspective(image_i_np, H_total, (panorama_width, panorama_height), flags=cv2.INTER_NEAREST).astype(np.float32)
+        warp_end = time.time()
+        print(f"Image {i + 1}: Warp time: {warp_end - warp_start:.4f} seconds")
 
-        # Warp the mask
+        # Time mask creation
+        mask_start = time.time()
+        # Create a mask and warp it with expanded corners for slight overlap
         hi, wi = image_i_np.shape[:2]
         mask_i = np.ones((hi, wi), dtype=np.uint8) * 255
-        warped_mask_i = cv2.warpPerspective(mask_i, H_total, (panorama_width, panorama_height))
 
-        # Update panorama and mask_panorama with original blending logic
-        mask_overlap = warped_mask_i > 0
-        panorama[mask_overlap] = warped_image_i[mask_overlap]
-        mask_panorama[mask_overlap] = warped_mask_i[mask_overlap]
-        print(f"Stitching image {i + 1} of {len(original_images)}")
+        # Create an expanded version of the mask to ensure slight overlap
+        expansion_kernel = np.ones((5, 5), np.uint8)  # Expand by 1-2 pixels using a 5x5 kernel
+        expanded_mask_i = cv2.dilate(mask_i, expansion_kernel, iterations=1)
 
-    print("Stitching completed.")
+        warped_mask_i = cv2.warpPerspective(expanded_mask_i, H_total, (panorama_width, panorama_height), flags=cv2.INTER_NEAREST).astype(np.float32) / 255
+        mask_end = time.time()
+        print(f"Image {i + 1}: Mask creation time: {mask_end - mask_start:.4f} seconds")
+
+        # Time box blur approximation
+        blur_start = time.time()
+        # Identify overlapping and non-overlapping regions
+        mask_overlap = (mask_panorama > 0) & (warped_mask_i > 0)
+        mask_non_overlap = (mask_panorama == 0) & (warped_mask_i > 0)
+
+        # Calculate overlap percentage
+        overlap_area = np.sum(mask_overlap)
+        total_area = warped_image_i.shape[0] * warped_image_i.shape[1]
+        overlap_percentage = overlap_area / total_area if total_area > 0 else 0
+
+        # Dynamically calculate the box kernel size based on overlap and image dimensions
+        min_dim = min(hi, wi)
+        dynamic_kernel_ratio = base_kernel_ratio * (1 + overlap_percentage)  # Adjust kernel ratio based on overlap
+        kernel_size = max(int(min_dim * dynamic_kernel_ratio), 3)
+
+        # Ensure kernel size is odd
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+
+        # Cap the kernel size to prevent excessively large kernel values
+        max_kernel_size = 1001  # This can be adjusted based on your preference
+        kernel_size = min(kernel_size, max_kernel_size)
+
+        # Apply box blur with multiple passes to approximate Gaussian blur
+        weight_map = apply_box_blur_multiple_passes(warped_mask_i, kernel_size, passes=3)
+
+        blur_end = time.time()
+        print(f"Image {i + 1}: Box blur time: {blur_end - blur_start:.4f} seconds")
+
+        # Expand weight map to match RGB channels if the image has 3 channels
+        expand_start = time.time()
+        if warped_image_i.shape[-1] == 3:
+            weight_map = np.stack([weight_map] * 3, axis=-1)
+        expand_end = time.time()
+        print(f"Image {i + 1}: Expand weight map time: {expand_end - expand_start:.4f} seconds")
+
+        # Update blending to ignore areas initialized with -1
+        valid_overlap = mask_overlap & (panorama[..., 0] != -1)
+
+        # Convert boolean masks to integer masks (as numba does not handle boolean indexing well)
+        mask_overlap = mask_overlap.astype(np.uint8)
+        valid_overlap = valid_overlap.astype(np.uint8)
+        mask_non_overlap = mask_non_overlap.astype(np.uint8)
+
+        # Blend overlapping and non-overlapping regions using numba-accelerated function
+        blend_start = time.time()
+        panorama = blend_regions(panorama, warped_image_i, weight_map, mask_overlap, valid_overlap, mask_non_overlap)
+        blend_end = time.time()
+        print(f"Image {i + 1}: Blending time: {blend_end - blend_start:.4f} seconds")
+
+        # Update the mask_panorama to mark the new covered regions
+        mask_panorama[warped_mask_i > 0] = 255
+
+        # End time for each image stitching
+        image_end_time = time.time()
+        print(f"Image {i + 1}: Total stitching time: {image_end_time - image_start_time:.4f} seconds")
+
+    # Replace areas initialized with -1 with zeros (or another suitable background value)
+    final_replace_start = time.time()
+    panorama[panorama == -1] = 0
+    panorama = panorama.astype(np.uint8)
+    final_replace_end = time.time()
+    print(f"Final replace time: {final_replace_end - final_replace_start:.4f} seconds")
+
+    # End overall timer
+    end_time = time.time()
+    print(f"Stitching completed in {end_time - start_time:.4f} seconds.")
+    
     return panorama
+
 
 def run_stitching_pipeline(config_path, save_img=False):
     """Run the complete stitching pipeline with configuration from a YAML file."""

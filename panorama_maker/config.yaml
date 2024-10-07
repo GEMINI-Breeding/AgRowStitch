@@ -1,8 +1,8 @@
 device: "cuda"  # Use "cuda" for GPU, "mps" for Mac, or "cpu"
-image_directory: "../data/local-kramlich-images/"
+image_directory: "../data/marcci-sorghum-subset/"
 save_image: True
 output_dir: "../output"
-output_filename: "grape_2daffine_xy.png"
+output_filename: "marcci-sorghum-subset-timeprof.png"
 batch_size: 50
 max_workers: 8
 left_crop: 0
@@ -13,4 +13,4 @@ fixed_height: 768
 fixed_width: 1024
 extractor: 'superpoint'
 H_transform_method: 'RANSAC' # 'LMEDS'
-pts_transformation: 'translation_x' # 'translation_x', 'translation_y', 'translation_2d', 'translation_scale', 'rotation_translation', 'affine_partial', 'affine_full'
+pts_transformation: 'translation_2d' # 'translation_x', 'translation_y', 'translation_2d', 'translation_scale', 'rotation_translation', 'affine_partial', 'affine_full'
