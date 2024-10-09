@@ -5,7 +5,8 @@ import re
 import yaml
 import torch
 import numba
-from numba import jit
+import time
+from numba import jit, njit
 import numpy as np
 from lightglue import LightGlue, SuperPoint, ALIKED
 from lightglue.utils import rbd
@@ -293,165 +294,290 @@ def match_keypoints(feats_list, original_sizes, config):
 
     return transformations, all_corners
 
-import cv2
+import matplotlib.pyplot as plt
+# Cache for gradient masks of different sizes
+# Cache for gradient masks of different sizes
+gradient_mask_cache = {}
+
+def warp_partial(image, H, output_shape, min_x, min_y, max_x, max_y):
+    """Warp only a portion of the image defined by a bounding box, with detailed profiling."""
+    height, width = output_shape[:2]
+
+    # Start profiling
+    start_time = time.time()
+    
+    # Create bounding box with homogeneous coordinates
+    bbox = np.array([[min_x, min_y, 1], [max_x, min_y, 1], 
+                     [max_x, max_y, 1], [min_x, max_y, 1]], dtype=np.float32).T
+    bbox_time = time.time()
+    print(f"Bounding box creation time: {bbox_time - start_time:.4f} seconds")
+    
+    # Apply transformation matrix to the bounding box points
+    bbox_transformed = H @ bbox
+    bbox_transformed /= bbox_transformed[2]  # Convert back to 2D by dividing by the last coordinate
+    transform_time = time.time()
+    print(f"Transformation application time: {transform_time - bbox_time:.4f} seconds")
+
+    # Extract transformed points for the new ROI bounding box
+    transformed_bbox = bbox_transformed[:2].T.astype(np.float32).reshape(4, 2)
+    extraction_time = time.time()
+    print(f"Bounding box extraction time: {extraction_time - transform_time:.4f} seconds")
+
+    # Original bbox points (source) for getPerspectiveTransform
+    bbox_points = np.array([[min_x, min_y], [max_x, min_y], 
+                            [max_x, max_y], [min_x, max_y]], dtype=np.float32)
+    perspective_time = time.time()
+    print(f"Perspective points setup time: {perspective_time - extraction_time:.4f} seconds")
+
+    # Calculate the perspective transform for just the ROI
+    H_roi = cv2.getPerspectiveTransform(bbox_points, transformed_bbox)
+    perspective_transform_time = time.time()
+    print(f"Perspective transformation calculation time: {perspective_transform_time - perspective_time:.4f} seconds")
+
+    # Warp only the selected ROI
+    roi_warped = cv2.warpPerspective(image, H_roi, (width, height), flags=cv2.INTER_NEAREST)
+    warp_end_time = time.time()
+    print(f"Warp operation time: {warp_end_time - perspective_transform_time:.4f} seconds")
+
+    total_time = warp_end_time - start_time
+    print(f"Total warp_partial execution time: {total_time:.4f} seconds")
+    
+    return roi_warped
+
+
+# def generate_gradient_for_mask(mask, blending_buffer_width):
+#     """Generate a gradient mask specific to the warped mask's content."""
+#     # Identify the bounding box of the masked region to limit the gradient area
+#     coords = np.column_stack(np.where(mask > 0))
+#     y_min, x_min = coords.min(axis=0)
+#     y_max, x_max = coords.max(axis=0)
+
+#     # Define the shape of the masked region
+#     mask_height, mask_width = y_max - y_min + 1, x_max - x_min + 1
+    
+#     # Create a radial gradient mask for the masked area only
+#     mask_shape = (mask_height, mask_width)
+#     return create_radial_gradient_mask(mask_shape, blending_buffer_width), (y_min, y_max, x_min, x_max)
+
+# @njit
+# def create_radial_gradient_mask(shape, buffer_width):
+#     """Creates a gradient mask within a specified area that falls off from 1 at the edges to 0."""
+#     h, w = shape
+#     gradient_mask = np.zeros((h, w), dtype=np.float32)
+#     for y in range(h):
+#         for x in range(w):
+#             dist_to_edge = min(x, w - x - 1, y, h - y - 1)  # Distance to the nearest edge
+#             gradient_value = max(0, min(1, dist_to_edge / buffer_width))
+#             gradient_mask[y, x] = gradient_value
+#     return gradient_mask
+
+
+# @njit
+# def create_radial_gradient_mask(shape, buffer_width):
+#     """Creates a gradient mask that falls off from 1 at the edge to 0 over the buffer distance towards the center."""
+#     h, w = shape
+#     gradient_mask = np.zeros((h, w), dtype=np.float32)
+
+#     for y in range(h):
+#         for x in range(w):
+#             dist_to_edge = min(x, w - x - 1, y, h - y - 1)  # Distance to the nearest edge
+#             gradient_value = max(0, min(1, dist_to_edge / buffer_width))
+#             gradient_mask[y, x] = gradient_value
+
+#     return gradient_mask
+
 import numpy as np
-from numba import jit
+from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import zoom
 
-@jit(nopython=True)
-def blend_regions(panorama, warped_image, weight_map, mask_overlap, valid_overlap, mask_non_overlap):
-    """Blend the overlapping and non-overlapping regions using Numba for speedup."""
-    # Smoothly blend overlapping regions using the Gaussian weight map
-    for y in range(panorama.shape[0]):
-        for x in range(panorama.shape[1]):
-            if valid_overlap[y, x]:
-                for c in range(3):  # Iterate over each color channel (R, G, B)
-                    panorama[y, x, c] = (weight_map[y, x, c] * warped_image[y, x, c] +
-                                         (1 - weight_map[y, x, c]) * panorama[y, x, c])
-            elif mask_non_overlap[y, x]:
-                for c in range(3):
-                    panorama[y, x, c] = warped_image[y, x, c]
 
-    return panorama
+# Cache dictionary for storing gradient masks
+# Cache dictionary for storing gradient masks
+gradient_cache = {}
 
 import time
 
-def apply_box_blur_multiple_passes(image, kernel_size, passes=3):
-    """Apply multiple passes of a box filter to approximate Gaussian blur."""
-    blurred = image.copy()
-    for _ in range(passes):
-        blurred = cv2.boxFilter(blurred, -1, (kernel_size, kernel_size))
-    return blurred
-
-def stitch_images(original_images, transformations, all_corners):
-    """Stitch images together into a panorama using box filter approximation for smoother transitions."""
-    print("Starting stitching of images...")
+def create_radial_gradient_mask_approx(shape, buffer_width):
+    """Creates an approximate radial gradient mask using pure numpy vectorization with detailed profiling."""
+    h, w = shape
     
-    # Start overall timer
+    # Start profiling
     start_time = time.time()
     
+    # Create grids for x and y coordinates
+    y_indices, x_indices = np.ogrid[:h, :w]
+    coord_grid_time = time.time()
+    print(f"Coordinate grid creation time: {coord_grid_time - start_time:.4f} seconds")
+    
+    # Calculate distances to each edge
+    dist_to_left = x_indices
+    dist_to_right = w - x_indices - 1
+    dist_to_top = y_indices
+    dist_to_bottom = h - y_indices - 1
+    edge_distance_time = time.time()
+    print(f"Edge distance calculation time: {edge_distance_time - coord_grid_time:.4f} seconds")
+    
+    # Combine distances using chained np.minimum calls
+    dist_to_edge = np.minimum(dist_to_left, dist_to_right)
+    dist_to_edge = np.minimum(dist_to_edge, dist_to_top)
+    dist_to_edge = np.minimum(dist_to_edge, dist_to_bottom)
+    min_distance_time = time.time()
+    print(f"Minimum distance calculation time: {min_distance_time - edge_distance_time:.4f} seconds")
+    
+    # Normalize and clip based on buffer width
+    gradient_mask = np.clip(dist_to_edge / buffer_width, 0, 1).astype(np.float32)
+    normalize_time = time.time()
+    print(f"Normalization and clipping time: {normalize_time - min_distance_time:.4f} seconds")
+    
+    # Total time
+    total_time = normalize_time - start_time
+    print(f"Total create_radial_gradient_mask_approx time: {total_time:.4f} seconds")
+    
+    return gradient_mask
+
+def optimized_boundary_detection(mask):
+    """Optimized boundary detection with purely numpy operations for speed."""
+    # Find non-zero rows and columns
+    non_zero_rows = np.where(mask.any(axis=1))[0]
+    non_zero_cols = np.where(mask.any(axis=0))[0]
+    # Get boundaries
+    y_min, y_max = non_zero_rows[[0, -1]]
+    x_min, x_max = non_zero_cols[[0, -1]]
+    return y_min, y_max, x_min, x_max
+
+
+# Cache dictionary for storing gradient masks
+gradient_cache = {}
+
+def generate_gradient_for_mask(mask, blending_buffer_width):
+    """Generate a gradient mask specific to the warped mask's content, with caching for performance."""
+    start_time = time.time()
+
+    # Finding mask boundaries
+    coords_start = time.time()
+    y_min, y_max, x_min, x_max = optimized_boundary_detection(mask)
+    mask_shape = (y_max - y_min + 1, x_max - x_min + 1)
+    coords_end = time.time()
+    print(f"Coords finding time: {coords_end - coords_start:.4f} seconds")
+
+    # Caching
+    cache_start = time.time()
+    cache_key = (mask_shape, blending_buffer_width)
+    if cache_key in gradient_cache:
+        gradient_mask = gradient_cache[cache_key]
+        print(f"Cache hit for shape {mask_shape}")
+    else:
+        # Generate gradient mask and cache it
+        gradient_mask = create_radial_gradient_mask_approx(mask_shape, blending_buffer_width)
+        gradient_cache[cache_key] = gradient_mask
+        print(f"Cache miss for shape {mask_shape}")
+    cache_end = time.time()
+    print(f"Cache check and retrieval time: {cache_end - cache_start:.4f} seconds")
+
+    total_time = time.time() - start_time
+    print(f"Total execution time for generate_gradient_for_mask: {total_time:.4f} seconds")
+
+    return gradient_mask, (y_min, y_max, x_min, x_max)
+
+
+import time
+
+@njit
+def optimized_blend_regions(panorama, warped_image, weight_map, mask_overlap, mask_non_overlap):
+    """Efficiently blend overlapping and non-overlapping regions with Numba."""
+    h, w = mask_overlap.shape
+    for y in range(h):
+        for x in range(w):
+            if mask_overlap[y, x]:
+                for c in range(3):  # For each color channel
+                    panorama[y, x, c] = (
+                        weight_map[y, x] * warped_image[y, x, c] +
+                        (1 - weight_map[y, x]) * panorama[y, x, c]
+                    )
+            elif mask_non_overlap[y, x]:
+                # Directly copy non-overlapping pixels from warped image
+                panorama[y, x] = warped_image[y, x]
+    return panorama
+
+
+import time
+
+def stitch_images(original_images, transformations, all_corners, blending_buffer_width=50):
+    """Stitch images with blending specifically within the warped mask area, with time profiling."""
     all_corners = np.vstack(all_corners)
     x_min, y_min = np.int32(all_corners.min(axis=0) - 0.5)
     x_max, y_max = np.int32(all_corners.max(axis=0) + 0.5)
     panorama_width = x_max - x_min
     panorama_height = y_max - y_min
 
-    total_stitching = len(original_images)
-    stitch_count = 0
-
-    # Compute the translation matrix
-    translation = np.array([[1, 0, -x_min],
-                            [0, 1, -y_min],
-                            [0, 0, 1]])
-
-    # Initialize the panorama and mask
+    translation = np.array([[1, 0, -x_min], [0, 1, -y_min], [0, 0, 1]])
     panorama = np.full((panorama_height, panorama_width, 3), -1, dtype=np.float32)
     mask_panorama = np.zeros((panorama_height, panorama_width), dtype=np.uint8)
 
-    # Baseline kernel size ratio for Gaussian blur (tunable)
-    base_kernel_ratio = 0.163  # Derived value for optimal blending based on image size
+    start_stitch_time = time.time()
+    for i, image_tensor in enumerate(original_images):
+        print(f"\nStitching image {i + 1}/{len(original_images)}")
+        start_time_stitch_i = time.time()
 
-    # Start processing each image
-    for i in range(len(original_images)):
-        stitch_count += 1
-        print(f"Stitching image {stitch_count}/{total_stitching}")
+        # Transformation application
+        transform_start = time.time()
+        H_total = translation @ transformations[i]
+        transform_end = time.time()
+        print(f"Transformation time: {transform_end - transform_start:.4f} seconds")
 
-        # Start time for each image stitching
-        image_start_time = time.time()
-
-        H = transformations[i]
-        H_total = translation @ H
-
-        # Time warp operation
+        # Warping image and mask
         warp_start = time.time()
-        # Warp the image using nearest neighbor interpolation to avoid new artifacts
-        image_i_np = tensor_to_image(original_images[i])
-        warped_image_i = cv2.warpPerspective(image_i_np, H_total, (panorama_width, panorama_height), flags=cv2.INTER_NEAREST).astype(np.float32)
+        image_np = tensor_to_image(image_tensor)
+        warped_image = warp_partial(image_np, H_total, (panorama_height, panorama_width), x_min, y_min, x_max, y_max)
+        warped_mask = warp_partial(np.ones(image_np.shape[:2], dtype=np.uint8) * 255, H_total, (panorama_height, panorama_width), x_min, y_min, x_max, y_max)
         warp_end = time.time()
-        print(f"Image {i + 1}: Warp time: {warp_end - warp_start:.4f} seconds")
+        print(f"Warping time: {warp_end - warp_start:.4f} seconds")
 
-        # Time mask creation
-        mask_start = time.time()
-        # Create a mask and warp it with expanded corners for slight overlap
-        hi, wi = image_i_np.shape[:2]
-        mask_i = np.ones((hi, wi), dtype=np.uint8) * 255
+        # Generating the gradient mask for the warped mask content
+        gradient_start = time.time()
+        gradient_mask, (y_min_g, y_max_g, x_min_g, x_max_g) = generate_gradient_for_mask(warped_mask, blending_buffer_width)
+        gradient_end = time.time()
+        print(f"Gradient mask generation time: {gradient_end - gradient_start:.4f} seconds")
 
-        # Create an expanded version of the mask to ensure slight overlap
-        expansion_kernel = np.ones((5, 5), np.uint8)  # Expand by 1-2 pixels using a 5x5 kernel
-        expanded_mask_i = cv2.dilate(mask_i, expansion_kernel, iterations=1)
+        # Calculating overlap and applying blending
+        overlap_start = time.time()
+        mask_overlap = (mask_panorama[y_min_g:y_max_g+1, x_min_g:x_max_g+1] > 0) & (warped_mask[y_min_g:y_max_g+1, x_min_g:x_max_g+1] > 0)
+        mask_non_overlap = (mask_panorama[y_min_g:y_max_g+1, x_min_g:x_max_g+1] == 0) & (warped_mask[y_min_g:y_max_g+1, x_min_g:x_max_g+1] > 0)
+        overlap_end = time.time()
+        print(f"Overlap calculation time: {overlap_end - overlap_start:.4f} seconds")
 
-        warped_mask_i = cv2.warpPerspective(expanded_mask_i, H_total, (panorama_width, panorama_height), flags=cv2.INTER_NEAREST).astype(np.float32) / 255
-        mask_end = time.time()
-        print(f"Image {i + 1}: Mask creation time: {mask_end - mask_start:.4f} seconds")
+        blending_start = time.time()
+        effective_gradient = np.where(mask_overlap, gradient_mask, 1)
+        panorama[y_min_g:y_max_g+1, x_min_g:x_max_g+1] = optimized_blend_regions(
+            panorama[y_min_g:y_max_g+1, x_min_g:x_max_g+1],
+            warped_image[y_min_g:y_max_g+1, x_min_g:x_max_g+1],
+            effective_gradient,
+            mask_overlap,
+            mask_non_overlap
+        )
+        blending_end = time.time()
+        print(f"Blending time: {blending_end - blending_start:.4f} seconds")
 
-        # Time box blur approximation
-        blur_start = time.time()
-        # Identify overlapping and non-overlapping regions
-        mask_overlap = (mask_panorama > 0) & (warped_mask_i > 0)
-        mask_non_overlap = (mask_panorama == 0) & (warped_mask_i > 0)
+        # Update the panorama mask
+        mask_update_start = time.time()
+        # mask_panorama[warped_mask > 0] = 255
+        np.bitwise_or(mask_panorama, warped_mask, out=mask_panorama)
+        mask_update_end = time.time()
+        print(f"Mask update time: {mask_update_end - mask_update_start:.4f} seconds")
 
-        # Calculate overlap percentage
-        overlap_area = np.sum(mask_overlap)
-        total_area = warped_image_i.shape[0] * warped_image_i.shape[1]
-        overlap_percentage = overlap_area / total_area if total_area > 0 else 0
+        end_time_stitch_i = time.time()
+        print(f"Total time to stitch image: {end_time_stitch_i - start_time_stitch_i:.4f} seconds")
 
-        # Dynamically calculate the box kernel size based on overlap and image dimensions
-        min_dim = min(hi, wi)
-        dynamic_kernel_ratio = base_kernel_ratio * (1 + overlap_percentage)  # Adjust kernel ratio based on overlap
-        kernel_size = max(int(min_dim * dynamic_kernel_ratio), 3)
-
-        # Ensure kernel size is odd
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-
-        # Cap the kernel size to prevent excessively large kernel values
-        max_kernel_size = 1001  # This can be adjusted based on your preference
-        kernel_size = min(kernel_size, max_kernel_size)
-
-        # Apply box blur with multiple passes to approximate Gaussian blur
-        weight_map = apply_box_blur_multiple_passes(warped_mask_i, kernel_size, passes=3)
-
-        blur_end = time.time()
-        print(f"Image {i + 1}: Box blur time: {blur_end - blur_start:.4f} seconds")
-
-        # Expand weight map to match RGB channels if the image has 3 channels
-        expand_start = time.time()
-        if warped_image_i.shape[-1] == 3:
-            weight_map = np.stack([weight_map] * 3, axis=-1)
-        expand_end = time.time()
-        print(f"Image {i + 1}: Expand weight map time: {expand_end - expand_start:.4f} seconds")
-
-        # Update blending to ignore areas initialized with -1
-        valid_overlap = mask_overlap & (panorama[..., 0] != -1)
-
-        # Convert boolean masks to integer masks (as numba does not handle boolean indexing well)
-        mask_overlap = mask_overlap.astype(np.uint8)
-        valid_overlap = valid_overlap.astype(np.uint8)
-        mask_non_overlap = mask_non_overlap.astype(np.uint8)
-
-        # Blend overlapping and non-overlapping regions using numba-accelerated function
-        blend_start = time.time()
-        panorama = blend_regions(panorama, warped_image_i, weight_map, mask_overlap, valid_overlap, mask_non_overlap)
-        blend_end = time.time()
-        print(f"Image {i + 1}: Blending time: {blend_end - blend_start:.4f} seconds")
-
-        # Update the mask_panorama to mark the new covered regions
-        mask_panorama[warped_mask_i > 0] = 255
-
-        # End time for each image stitching
-        image_end_time = time.time()
-        print(f"Image {i + 1}: Total stitching time: {image_end_time - image_start_time:.4f} seconds")
-
-    # Replace areas initialized with -1 with zeros (or another suitable background value)
-    final_replace_start = time.time()
-    panorama[panorama == -1] = 0
+    # Finalize the panorama
+    finalize_start = time.time()
+    panorama[panorama == -1] = 0  # Replace unassigned areas with black
     panorama = panorama.astype(np.uint8)
-    final_replace_end = time.time()
-    print(f"Final replace time: {final_replace_end - final_replace_start:.4f} seconds")
+    finalize_end = time.time()
+    print(f"Finalization time: {finalize_end - finalize_start:.4f} seconds")
 
-    # End overall timer
-    end_time = time.time()
-    print(f"Stitching completed in {end_time - start_time:.4f} seconds.")
-    
+    total_time = finalize_end - start_stitch_time
+    print(f"Total stitching time: {total_time:.4f} seconds")
+
     return panorama
 
 
