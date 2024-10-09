@@ -1,5 +1,5 @@
 device: "cuda"  # Use "cuda" for GPU, "mps" for Mac, or "cpu"
-image_directory: "../data/marcci-sorghum-subset/"
+image_directory: "../data/marcci-sorghum/"
 save_image: True
 output_dir: "../output"
 output_filename: "marcci-sorghum-subset-timeprof.png"
@@ -13,4 +13,4 @@ fixed_height: 768
 fixed_width: 1024
 extractor: 'superpoint'
 H_transform_method: 'RANSAC' # 'LMEDS'
-pts_transformation: 'translation_2d' # 'translation_x', 'translation_y', 'translation_2d', 'translation_scale', 'rotation_translation', 'affine_partial', 'affine_full'
+pts_transformation: 'rotation_translation' # 'translation_x', 'translation_y', 'translation_2d', 'translation_scale', 'rotation_translation', 'affine_partial', 'affine_full'
