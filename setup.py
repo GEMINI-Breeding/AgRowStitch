@@ -5,7 +5,7 @@ setup(
     version='0.1.0',
     description='A tool for stitching together images from agricultural scenes using LightGlue and other tools',
     author='GEMINI Breeding',
-    author_email='jmearles@ucdavis.edu',
+    author_email='ikuyehara@ucdavis.edu',
     url='https://github.com/GEMINI-Breeding/Panorama-Maker.git',  # Replace with your repo
     packages=find_packages(),
     install_requires=[
@@ -15,7 +15,8 @@ setup(
         'PyYAML',
         'torchvision',
         'ipykernel',
-        'matplotlib'
+        'matplotlib',
+        'stitching'
         # Add other dependencies
     ],
     dependency_links=[
