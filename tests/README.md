@@ -1,7 +1,10 @@
 We provide four sets of images for initial testing that can be accessed here:
 test_images1: https://ucdavis.box.com/s/xz60o4mpzue7tfe7aabsrmm3l32byb2z
+
 test_images2: https://ucdavis.box.com/s/nfdc31a3y3zl3sd5u3y7959o929ezl6o
+
 test_images3: https://ucdavis.box.com/s/h3e81mmlnximqerknphzfwsng3fom3ll
+
 test_images4: https://ucdavis.box.com/s/iy7f5ad5w0d5askgu0nslkgbxk3ah8sx
 
 
