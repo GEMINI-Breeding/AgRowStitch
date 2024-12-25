@@ -8,5 +8,8 @@ test_images3: https://ucdavis.box.com/s/h3e81mmlnximqerknphzfwsng3fom3ll
 
 test_images4: https://ucdavis.box.com/s/gpztrrzjxwws4lhqca16rnrup867suwt
 
+test_images6: https://ucdavis.box.com/s/fb35cc4wieo1of565yr4iwmyq77te2h8
 
-The output of these images can be found with the corresponding labels for comparison with other methods. Poor alignment is generally due to high camera movement in the non-stitching direction, plant movement, or a frame rate too low for the amount of movement. If stitching fails, reducing the min_inliers will help ignore poor matching, but may result in lower quality. To improve stitching, try with a higher frame rate.
+
+
+The output of these images can be found with the corresponding labels for comparison with other methods. Poor alignment is generally due to high camera movement in the non-stitching direction, plant movement, or a frame rate too low for the amount of movement. If stitching fails, reducing the min_inliers will help ignore poor matching, but may result in lower quality. To improve stitching, try with a higher frame rate. For affine stitching with test_images6, there is a misalignment that is fixed when a spherical projection is chosen (shown here).
