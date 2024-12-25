@@ -578,7 +578,11 @@ def run_stitching_pipeline(config_path):
     config = load_config(config_path)
     images, cv_features, matches = prepare_OpenCV_objects(config)
     if config['projection'] == "spherical":
-        panorama = spherical_OpenCV_pipeline(images, cv_features, matches, config)
+        try:
+            panorama = spherical_OpenCV_pipeline(images, cv_features, matches, config)
+        except (ValueError):
+            print("Spherical projection failed, trying affine projection instead...")
+            panorama = affine_OpenCV_pipeline(images, cv_features, matches, config)
     else:
         panorama = affine_OpenCV_pipeline(images, cv_features, matches, config)
     if config['save_image']:
