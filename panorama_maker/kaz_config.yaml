@@ -10,8 +10,8 @@ seam_resolution: 0.4 #reduce resolution of final resolution by this amount to fi
 stitching_direction: "LEFT" #("RIGHT", "UP", "DOWN") which edge of image is stitched to the next image
 keypoint_prop: 0.5 #starting range to filter for how close the keypoints need to be to stitching edge, 1.0 to turn off
 forward_limit: 6 #number of images ahead that can be stitched
-xy_ratio: 1.0 #minimum direction of travel/normal direction of travel in homography
+xy_ratio: 0.8 #minimum direction of travel/normal direction of travel in homography
 scale_constraint: 0.2 #maximum value that abs(scale-1) can take in homography
-min_inliers: 20 #the minimum number of inlier matches necessary to consider it a match, should be over six
+min_inliers: 40 #the minimum number of inlier matches necessary to consider it a match, should be over six
 crop: False #crop final panorama to be rectangular
 projection: "affine" #or "spherical" if the camera is stationary and rotating
