@@ -14,4 +14,4 @@ xy_ratio: 0.8 #minimum direction of travel/normal direction of travel in homogra
 scale_constraint: 0.2 #maximum value that abs(scale-1) can take in homography
 min_inliers: 40 #the minimum number of inlier matches necessary to consider it a match, should be over six
 crop: False #crop final panorama to be rectangular
-projection: "affine" #or "spherical" if the camera is stationary and rotating
+projection: "spherical" #"affine" or "spherical" if the camera is stationary and rotating, spherical is currently recommended
