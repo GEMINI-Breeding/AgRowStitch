@@ -1,4 +1,4 @@
-We provide four sets of images for initial testing that can be accessed here:
+We provide five sets of images for initial testing that can be accessed here:
 
 test_images1: https://ucdavis.box.com/s/xz60o4mpzue7tfe7aabsrmm3l32byb2z
 
