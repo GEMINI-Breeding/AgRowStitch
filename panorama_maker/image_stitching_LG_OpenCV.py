@@ -380,7 +380,7 @@ def affine_camera_adjustment(features, matches):
     #and fails. It should be easier if there is high confidence between subsequent images
     #and the correct adjustment (affine or spherical) is chosen. Lower the confidence threshold
     #to pass adjustment, but adjustment might be more error prone.
-    adjuster = cv2.detail_BundleAdjusterAffinePartial()
+    adjuster = cv2.detail_BundleAdjusterAffine() #use cv2.detail_BundleAdjusterAffinePartial to remove shearing
     adjuster.setConfThresh(0.25)
     success, cameras =adjuster.apply(features, matches, cameras)
     if not success:
