@@ -16,8 +16,7 @@ setup(
         'torchvision',
         'ipykernel',
         'matplotlib',
-        'stitching'
-        # Add other dependencies
+        # the stitching package allows for higher-level access to the opencv pipeline, but is not necessary
     ],
     dependency_links=[
         'https://github.com/cvg/LightGlue.git#egg=LightGlue'
