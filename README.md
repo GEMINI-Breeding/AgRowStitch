@@ -17,7 +17,7 @@ python -m pip install -e .
 ```
 
 ## Running
-Run "minimal_image_stitching_LG_OpenCV.py" from the command line with the path to your config.yaml as the only argument.
+Run "image_stitching.py" from the command line with the path to your config.yaml as the only argument.
 
 ### Stitching images
 Update the "config.yaml" to customize parameters and then pass the path of the config file when running the script. At a minimum, the image directory and output directories must be updated to run the pipeline. The images should contain a sequential number within the filename which corresponds to the timestamp or order in which the images should be stitched. We assume that subsequent images have overlapping areas, but we attempt to stitch only a subset of the images with the forward_limit corresponding to the number of images past the focal image that will be checked for stitching. As the overlap between subsequent images increases, the forward_limit should increase so that as few images as necessary are used. There is a balance between ensuring strong matching so that false matches are ignored and the pipeline failing to find any matches. The min_inliers and max_reprojection_error are the main parameters for changing the confidence between matches. We recommend extracting frames at high fps and using a small batch size (e.g. 20) for more reliable stitching.
