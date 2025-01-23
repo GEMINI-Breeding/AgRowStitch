@@ -1508,7 +1508,4 @@ def load_config(config_path):
 
 if __name__ == "__main__":
     config_path = sys.argv[1]
-    batch_only(config_path)
-    # start_place = int(sys.argv[2])
-    # run_batches(start_place, config_path)
-    # run_batches(0, config_path)
+    run_batches(0, config_path)
