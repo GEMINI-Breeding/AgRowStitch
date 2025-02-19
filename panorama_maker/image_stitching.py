@@ -27,7 +27,17 @@ def extract_features(img_path, config):
     #Load image and reduce resolution#
     ##################################
     image = cv2.imread(img_path) #Read image and then resize
-    medium_img = cv2.resize(image, dsize = None, fx = config["feature_resolution"], fy = config["feature_resolution"])
+    medium_img = cv2.resize(image, dsize = None, fx = config["final_resolution"], fy = config["final_resolution"])
+    if config["stitching_direction"] == 'RIGHT':
+        #Flip image across vertical axis so the stitching edge is now on the left
+        medium_img = cv2.flip(medium_img, 1)
+    elif config["stitching_direction"] == 'UP':
+        #Rotate 90 degrees CCW so stitching edge is now on the left
+        medium_img = cv2.rotate(medium_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    elif config["stitching_direction"] == 'DOWN':
+        #Rotate 90 degrees CCW so stitching edge is now on the left
+        medium_img = cv2.rotate(medium_img, cv2.ROTATE_90_CLOCKWISE)
+
     ####################################
     #Use SuperPoint to extract features#
     ####################################
@@ -73,20 +83,9 @@ def get_inliers(img_feats, img_paths, src_idx, dst_idx, img_dim, config):
     keypoint_prop_dict = {} #assume keys will stay ordered
     #We assume that for forward movement a keypoint_prop of at least 0.9 is necessary, so it is the upper limit
     for keypoint_prop in np.arange(config["keypoint_prop"], 1.0, 0.1): 
-        if config["stitching_direction"] == 'LEFT' or config["stitching_direction"] == 'UP':
-            src_pixel_limit = img_dim*(keypoint_prop)
-            dst_pixel_limit = img_dim*(1 - keypoint_prop)
-        else:
-            src_pixel_limit = img_dim*(1 - keypoint_prop)
-            dst_pixel_limit = img_dim*(keypoint_prop)
-        if config["stitching_direction"] == 'LEFT':
-            filtered_idx = np.where((m_kpts0_np[:,0] < src_pixel_limit) & (m_kpts1_np[:,0] > dst_pixel_limit))
-        elif config["stitching_direction"] == 'UP':
-            filtered_idx = np.where((m_kpts0_np[:,1] < src_pixel_limit) & (m_kpts1_np[:,1] > dst_pixel_limit))
-        elif config["stitching_direction"] == 'RIGHT':
-            filtered_idx = np.where((m_kpts0_np[:,0] > src_pixel_limit) & (m_kpts1_np[:,0] < dst_pixel_limit))
-        else:
-            filtered_idx = np.where((m_kpts0_np[:,1] < src_pixel_limit) & (m_kpts1_np[:,1] > dst_pixel_limit))
+        src_pixel_limit = img_dim*(keypoint_prop)
+        dst_pixel_limit = img_dim*(1 - keypoint_prop)
+        filtered_idx = np.where((m_kpts0_np[:,0] < src_pixel_limit) & (m_kpts1_np[:,0] > dst_pixel_limit))
         #Need at least four points to find a transform
         if len(filtered_idx[0]) > 3:
             keypoint_prop_dict[keypoint_prop] = filtered_idx
@@ -117,18 +116,8 @@ def get_inliers(img_feats, img_paths, src_idx, dst_idx, img_dim, config):
             #Filter based on homography constraints#
             ########################################
             if transformation_matrix is not None:
-                if config["stitching_direction"] == 'LEFT':
-                    stitch_movement = transformation_matrix[0, 2]
-                    forward_vs_lateral = abs(transformation_matrix[0,2]/transformation_matrix[1,2])
-                elif config["stitching_direction"] == 'UP':
-                    stitch_movement = transformation_matrix[1, 2]
-                    forward_vs_lateral = abs(transformation_matrix[1,2]/transformation_matrix[0,2])
-                elif config["stitching_direction"] == 'RIGHT':
-                    stitch_movement = -1*transformation_matrix[0, 2]
-                    forward_vs_lateral = abs(transformation_matrix[0,2]/transformation_matrix[1,2])
-                else:
-                    stitch_movement = -1*transformation_matrix[1, 2]
-                    forward_vs_lateral = abs(transformation_matrix[1,2]/transformation_matrix[0,2])
+                stitch_movement = transformation_matrix[0, 2]
+                forward_vs_lateral = abs(transformation_matrix[0,2]/transformation_matrix[1,2])
                 scale = (transformation_matrix[0,0]**2 + transformation_matrix[1,0]**2)**0.5 #estimate scale factor
                 #We only want matches where the homography matrix indicates that there is positive movement in the
                 #stitching direction, there is more movement in the stitching direction that the normal, and that
@@ -228,7 +217,6 @@ def get_LMEDS_error(kp0, kp1, config):
     #We expect that the median error will be minimized when excluding the most
     #non-planar point, which should have the highest reprojection error
     H_LMEDS, _LMEDS = cv2.findHomography(kp0, kp1, cv2.LMEDS)
-        
     if H_LMEDS is None:
         #We assume that if no homography matrix can be found, there are already
         #too few points and we can stop searching
@@ -248,10 +236,7 @@ def check_forward_matches(img_matches, img_feats, img_paths, src_idx, img_dims, 
     #Try to find matches with keypoints clustered on their stitching edge#
     ######################################################################
     #Need to know which part of the image we should expect src points to be on vs. dst points
-    if config["stitching_direction"] == 'LEFT' or config["stitching_direction"] == 'RIGHT':
-        img_dim = img_dims[0]
-    else:
-        img_dim = img_dims[1]
+    img_dim = img_dims[0]
     ##############################################
     #Check  images starting with far images first#
     ###############################################
@@ -281,7 +266,17 @@ def find_matching_images(img_paths, start_idx, config):
     # at high confidence and connect the first and last image#
     ##########################################################
     image = cv2.imread(img_paths[0]) #load first image to get dimensions
-    dummy_img = cv2.resize(image, dsize = None, fx = config["feature_resolution"], fy = config["feature_resolution"])
+    dummy_img = cv2.resize(image, dsize = None, fx = config["final_resolution"], fy = config["final_resolution"])
+    if config["stitching_direction"] == 'RIGHT':
+        #Flip image across vertical axis so the stitching edge is now on the left
+        dummy_img = cv2.flip(dummy_img, 1)
+    elif config["stitching_direction"] == 'UP':
+        #Rotate 90 degrees CCW so stitching edge is now on the left
+        dummy_img = cv2.rotate(dummy_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    elif config["stitching_direction"] == 'DOWN':
+        #Rotate 90 degrees CCW so stitching edge is now on the left
+        dummy_img = cv2.rotate(dummy_img, cv2.ROTATE_90_CLOCKWISE)
+        
     img_xdim, img_ydim = dummy_img.shape[1], dummy_img.shape[0]
     img_dims = (img_xdim, img_ydim)
     #A dictionary to hold matching src and dst keypoints and features between images
@@ -301,7 +296,7 @@ def find_matching_images(img_paths, start_idx, config):
             filtered = False
         src_idx = dst_idx
         image_subset.append(dst_idx)
-    print('Using ', len(image_subset), ' images of the initial ', image_subset[-1] - image_subset[0])
+    print('Using ', len(image_subset), ' images of the initial ', image_subset[-1] - image_subset[0] + 1)
     return img_matches, image_subset, filtered
 
 def build_feature_objects(subset_image_paths, img_matches, subset_indices, config):
@@ -310,7 +305,16 @@ def build_feature_objects(subset_image_paths, img_matches, subset_indices, confi
     ##############################################################################
     cv_features = []
     image = cv2.imread(subset_image_paths[0]) #load first image to get dimensions
-    dummy_img = cv2.resize(image, dsize = None, fx = config["feature_resolution"], fy = config["feature_resolution"])
+    dummy_img = cv2.resize(image, dsize = None, fx = config["final_resolution"], fy = config["final_resolution"])
+    if config["stitching_direction"] == 'RIGHT':
+        #Flip image across vertical axis so the stitching edge is now on the left
+        dummy_img = cv2.flip(dummy_img, 1)
+    elif config["stitching_direction"] == 'UP':
+        #Rotate 90 degrees CCW so stitching edge is now on the left
+        dummy_img = cv2.rotate(dummy_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    elif config["stitching_direction"] == 'DOWN':
+        #Rotate 90 degrees CCW so stitching edge is now on the left
+        dummy_img = cv2.rotate(dummy_img, cv2.ROTATE_90_CLOCKWISE)
     #We pass dummy images since we are manually setting the info
     for idx in subset_indices:
         feat = cv2.detail.computeImageFeatures2(cv2.ORB.create(), dummy_img)
@@ -395,6 +399,16 @@ def prepare_OpenCV_objects(start_idx, config):
     #######################################################################
     images = [cv2.resize(cv2.imread(image_paths[i]), dsize = None, fx = config["final_resolution"], fy = config["final_resolution"])
                                    for i in subset_indices]
+    if config["stitching_direction"] == 'RIGHT':
+        #Flip image across vertical axis so the stitching edge is now on the left
+        images = [cv2.flip(image, 1) for image in images]
+    elif config["stitching_direction"] == 'UP':
+        #Rotate 90 degrees CCW so stitching edge is now on the left
+        images = [cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE) for image in images]
+    elif config["stitching_direction"] == 'DOWN':
+        #Rotate 90 degrees CCW so stitching edge is now on the left
+        images = [cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE) for image in images]
+    
     ########################################################################################
     #Make a dictionary with the src and dst keypoints and features for the subset of images#
     ########################################################################################
@@ -471,10 +485,7 @@ def spherical_camera_estimation(features, matches, config):
         raise ValueError("Failed to adjust cameras")
     #To help maintain straighter panoramas, use wave correction to help account for
     #the camera angle changing and not being normal to the ground
-    if config["stitching_direction"] == 'LEFT' or config["stitching_direction"] == 'RIGHT':
-        wave_direction = cv2.detail.WAVE_CORRECT_HORIZ
-    else:
-        wave_direction = cv2.detail.WAVE_CORRECT_VERT
+    wave_direction = cv2.detail.WAVE_CORRECT_HORIZ
     rotation_matrices = [np.copy(cam.R) for cam in cameras]
     rotation_matrices = cv2.detail.waveCorrect(rotation_matrices, wave_direction)
     for i, cam in enumerate(cameras):
@@ -514,7 +525,7 @@ def spherical_warp_images(images, cameras, config):
     warped_final_masks = []
     final_corners = []
     final_sizes = []
-    camera_aspect = config["final_resolution"]/config["feature_resolution"]
+    camera_aspect = 1.0
     for img, camera in zip(images, cameras):
         warped_img, warped_mask, corner, size = spherical_warper(img, camera, scale, camera_aspect)
         warped_final_imgs.append(warped_img)
@@ -692,7 +703,7 @@ def affine_warp_images(images, cameras, config):
     warped_final_masks = []
     final_corners = []
     final_sizes = []
-    camera_aspect = config["final_resolution"]/config["feature_resolution"]
+    camera_aspect = 1.0
     for img, camera in zip(images, cameras):
         warped_img, warped_mask, corner, size = affine_warper(img, camera, camera_aspect)
         warped_final_imgs.append(warped_img)
@@ -821,10 +832,7 @@ def check_panorama(panorama, config):
     #assume that the camera has minimal rotation, the dimension of the panorama in the non-stitching direction
     #should be relatively constant. If the maximum/median value is to high, we assume there was a poor
     #stitch
-    if config["stitching_direction"] == 'LEFT' or config["stitching_direction"] == 'RIGHT':
-        dim= np.sum(thresh, axis = 0)
-    else:
-        dim = np.sum(thresh, axis = 1)
+    dim = np.sum(thresh, axis = 0)
     dim_ratio = np.max(dim)/np.median(dim)
     ############################
     #Check if panorama has gaps#
@@ -943,9 +951,13 @@ def run_stitching_pipeline(start_idx, config):
     ##############################################################################################
     #Check whether the panorama needs to be attempted again with different keypoints and features#
     ##############################################################################################
+    parent_dir = os.path.dirname(os.path.normpath(config["image_directory"]))
+    output_dir = os.path.basename(os.path.normpath(config["image_directory"])) + '_output'
+    output_path = os.path.join(parent_dir, output_dir)
+    output_filename = 'batch_' + os.path.basename(os.path.normpath(config["image_directory"])) + '.png'
     if check_panorama(panorama, config):
         print(f'Saving image {idx} ...')
-        cv2.imwrite(os.path.join(config['output_dir'], str(idx) + "_"  + config['output_filename']), panorama)
+        cv2.imwrite(os.path.join(output_path, str(idx) + "_"  + output_filename), panorama)
         return finished, idx, True
     else:
         ##############################################################
@@ -956,7 +968,7 @@ def run_stitching_pipeline(start_idx, config):
         #Use new panorama if it passed the check
         if new_panorama is not None:
             print(f'Saving image {idx} ...')
-            cv2.imwrite(os.path.join(config['output_dir'], str(new_idx) + "_"  + config['output_filename']), new_panorama)
+            cv2.imwrite(os.path.join(output_path, str(idx) + "_"  + output_filename), new_panorama)
             return new_finished, new_idx, True
         #Otherwise, report a failure and continue
         else:
@@ -968,7 +980,7 @@ def run_stitching_pipeline(start_idx, config):
 ###############################################################################
 
 
-def extract_all_panorama_features(images, search_distance, pad, config):
+def extract_all_panorama_features(images, search_distance, config):
     ##################################################################
     #Use SuperPoint to extract keypoints and features from panoramas#
     #################################################################
@@ -984,26 +996,11 @@ def extract_all_panorama_features(images, search_distance, pad, config):
         #Crop images using OpenCV index of height, width, but when we get the
         #keypoints back they will be in width, height format
         height, width = image.shape[0], image.shape[1]
-        if config["stitching_direction"] == 'LEFT':
-            src_img = image[:, :search_distance, :]
-            src_pad_array = np.array([0, 0])
-            dst_img = image[:, (width - pad[i] - search_distance ):(width - pad[i]), :]
-            dst_pad_array = np.array([width - pad[i] - search_distance , 0])
-        elif config["stitching_direction"] == 'UP':
-            src_img = image[: search_distance, :, :]
-            src_pad_array = np.array([0, 0])
-            dst_img = image[(height - pad[i] - search_distance): (height - pad[i]), :, :]
-            dst_pad_array = np.array([0, (height - pad[i] - search_distance)])
-        elif config["stitching_direction"] == 'RIGHT':
-            src_img = image[:, (width - pad[i] - search_distance):(width - pad[i]), :]
-            src_pad_array = np.array([width - pad[i] - search_distance , 0])
-            dst_img = image[:, :search_distance, :]
-            dst_pad_array = np.array([0, 0])
-        else:
-            src_img = image[(height - pad[i] - search_distance): (height - pad[i]), :, :]
-            src_pad_array = np.array([0, (height - pad[i] - search_distance)])
-            dst_img = image[:search_distance, :, :]
-            dst_pad_array = np.array([0, 0])
+        src_img = image[:, :search_distance, :]
+        src_pad_array = np.array([0, 0])
+        dst_img = image[:, (width - search_distance ):(width), :]
+        dst_pad_array = np.array([width - search_distance , 0])
+
         ####################################
         #Use SuperPoint to extract features#
         ####################################
@@ -1016,9 +1013,8 @@ def extract_all_panorama_features(images, search_distance, pad, config):
             src_feats = rbd(src_feats)
             src_feats['keypoints'] = src_feats['keypoints'].unsqueeze(0)
             #Now we need to transform the keypoint coordinates to the full panorama coordinates
-            src_feats['keypoints'] = torch.add(src_feats['keypoints'],
-                                               torch.from_numpy(np.tile(src_pad_array,
-                                                (src_feats['keypoints'].shape[1], 1))))
+            src_pad_tensor = torch.from_numpy(np.tile(src_pad_array, (src_feats['keypoints'].shape[1], 1))).to(config["device"])
+            src_feats['keypoints'] = torch.add(src_feats['keypoints'], src_pad_tensor)
             src_feats['descriptors'] = src_feats['descriptors'].unsqueeze(0)
             src_feats['keypoint_scores']= src_feats['keypoint_scores']
             dst_feats = extractor.extract(dst_image_tensor)
@@ -1026,25 +1022,26 @@ def extract_all_panorama_features(images, search_distance, pad, config):
             dst_feats = rbd(dst_feats)
             dst_feats['keypoints'] = dst_feats['keypoints'].unsqueeze(0)
             #Now we need to transform the keypoint coordinates to the full panorama coordinates
-            dst_feats['keypoints'] = torch.add(dst_feats['keypoints'],
-                                               torch.from_numpy(np.tile(dst_pad_array,
-                                                (dst_feats['keypoints'].shape[1], 1))))
+            dst_pad_tensor = torch.from_numpy(np.tile(dst_pad_array, (dst_feats['keypoints'].shape[1], 1))).to(config["device"])
+            dst_feats['keypoints'] = torch.add(dst_feats['keypoints'], dst_pad_tensor)
             dst_feats['descriptors'] = dst_feats['descriptors'].unsqueeze(0)
-            dst_feats['keypoint_scores']= dst_feats['keypoint_scores']
+            dst_feats['keypoint_scores'] = dst_feats['keypoint_scores']
         img_feats[i]['src'] = src_feats
         img_feats[i]['dst'] = dst_feats
     return img_feats
 
-def match_panorama_features(images, search_distance, pad, config):
+def match_panorama_features(images, search_distance, config):
     #####################################################################
     #Extract panorama features and then match keypoints across panoramas#
     #####################################################################
-    img_feats = extract_all_panorama_features(images, search_distance, pad, config)
+    print('Extracting panorama features...')
+    img_feats = extract_all_panorama_features(images, search_distance, config)
     img_match_dict = {} #Dictionary to store matching keypoints and features
     for i in range(len(images)):
         img_match_dict[i] = {'keypoints': {'src': [], 'dst': []}, 'features': {'src': [], 'dst': []}}
     #Use LightGlue for matching
     matcher = LightGlue(features="superpoint").eval().to(config["device"])
+    print('Matching panorama features...')
     for i in range(len(images) - 1):
         feat_dict = {'image0': img_feats[i]['src'], 'image1': img_feats[i + 1]['dst']}
         img_matches = matcher(feat_dict)
@@ -1125,84 +1122,33 @@ def adjust_panoramas(batch_imgs, config):
     #Pad images to have equal size in the non-stitching direction#
     ##############################################################
     image_dims = np.array([img.shape for img in batch_imgs])[:,:2]
-    #Put padding on the bottom and right side of images
-    if config["stitching_direction"] == 'LEFT' or config["stitching_direction"] == 'RIGHT':
-        pad = np.max(image_dims[:,0]) - image_dims[:,0]
-        padded_images = [cv2.copyMakeBorder(batch_imgs[i], 0, pad[i],  0, 0, cv2.BORDER_CONSTANT) for i in range(len(batch_imgs))]
-    else:
-        pad = np.max(image_dims[:,1]) - image_dims[:,1]
-        padded_images = [cv2.copyMakeBorder(batch_imgs[i], 0, 0,  0, pad[i], cv2.BORDER_CONSTANT) for i in range(len(batch_imgs))]
-    return padded_images, pad
+    #Put padding on the bottom of images
+    pad = np.max(image_dims[:,0]) - image_dims[:,0]
+    padded_images = [cv2.copyMakeBorder(batch_imgs[i], 0, pad[i],  0, 0, cv2.BORDER_CONSTANT) for i in range(len(batch_imgs))]
+    return padded_images
     
 def find_pano_corners(thresh, min_length, config):
-    ##########################################################################
-    #To find the corners of the panorama, we try to detect the vertical edges#
-    #and cross reference this with convex hull points                        #
-    ##########################################################################
-    #Use canny edge detection to find lines and dilate to make thick lines
-    kernel = np.ones((5, 5), np.uint8)
-    edges = cv2.Canny(thresh, 10, 500, None, 3)
-    edges = cv2.dilate(edges, kernel, iterations = 4)
-    #Use Hough Lines and then filter for lines that are longer than a minimum set by the original image dimensions
-    lines = cv2.HoughLinesP(edges, rho = 1, theta = np.pi/180, threshold = 10, minLineLength = min_length)
-    slopes = np.array([(lines[i][0][3] - lines[i][0][1])/ (lines[i][0][2] - lines[i][0][0] + 0.0001) for i in range(len(lines))])
-    ###########################
-    #Filter slopes and lengths#
-    ###########################
-    if config["stitching_direction"] == 'LEFT' or config["stitching_direction"] == 'RIGHT':
-        #To filter out horizontal lines, we only consider the lines with a slope of magnitude less than one
-        lines = lines[np.where(np.abs(slopes) > 1)]
-        #Then we separate the lines into the left and right side of the image
-        left_lines = lines[np.min(lines[:, 0, [0, 2]], axis = 1) < thresh.shape[1]*0.25]
-        right_lines = lines[np.min(lines[:, 0, [0, 2]], axis = 1) > thresh.shape[1]*0.75]
-    else:
-        #To filter out vertical lines, we only consider the lines with a slope of magnitude less than one
-        lines = lines[np.where(np.abs(slopes) < 1)]
-        #Then we separate the lines into the top (left) and bottom (right)
-        left_lines = lines[np.min(lines[:, 0, [0, 2]], axis = 1) < thresh.shape[0]*0.25]
-        right_lines = lines[np.min(lines[:, 0, [0, 2]], axis = 1) > thresh.shape[0]*0.75]
-    #Since the line finding is error prone, we choose the longest left and right line points
-    #as our corners
-    left_lengths = np.array([((left_lines[i][0][3] - left_lines[i][0][1])**2 +
-                          (left_lines[i][0][2] - left_lines[i][0][0])**2)**0.5
-                         for i in range(len(left_lines))])
-    right_lengths = np.array([((right_lines[i][0][3] - right_lines[i][0][1])**2 +
-                          (right_lines[i][0][2] - right_lines[i][0][0])**2)**0.5
-                         for i in range(len(right_lines))])
-    left_corners = left_lines[np.argmax(left_lengths)][0]
-    right_corners = right_lines[np.argmax(right_lengths)][0]
-    ##########################################
-    #Sort which corners are top versus bottom#
-    ##########################################
-    if left_corners[1] < left_corners[3]:
-        top_left = left_corners[0:2]
-        bottom_left = left_corners[2:]
-    else:
-        top_left = left_corners[2:]
-        bottom_left = left_corners[:2]
-    if right_corners[1] < right_corners[3]:
-        top_right = right_corners[0:2]
-        bottom_right = right_corners[2:]
-    else:
-        top_right = right_corners[2:]
-        bottom_right = right_corners[:2]
-    ###########################################################
-    #Cross-reference estimated corners with convex hull points#
-    ###########################################################
-    all_corners = (top_left, top_right, bottom_right, bottom_left)
+    #######################################################################
+    #To find the corners of the panorama, we find the convex hull points  #
+    #of the thresholded image that are closest to the corners of the image#
+    #######################################################################
+    closest_corners = []
     contours, h = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cnt_pts = contours[0].reshape(contours[0].shape[0], contours[0].shape[2])
     hull = cv2.convexHull(cnt_pts)
     hull_pts = hull.reshape(hull.shape[0], hull.shape[2])
-    hull_corners = []
-    #We find the convexhull point that is closest to the corners estimated with Hough Lines
-    #because we assume that the original points are in the right neighborhood, but are
-    #susceptible to assigning the wrong end points to the line, while the convex hull points are
-    #reliable, but choosing the right one can be difficult
-    for pt in all_corners:
-        closest = np.sqrt(((hull_pts - pt)**2).sum(axis = 1))
-        hull_corners.append(hull_pts[np.argmin(closest)])
-    return hull_corners
+    ymax, xmax = thresh.shape
+    top_left = [0, 0]
+    top_right = [xmax, 0]
+    bottom_left = [0, ymax]
+    bottom_right = [xmax, ymax]
+    all_corners = (top_left, top_right, bottom_right, bottom_left)
+    for img_corner in all_corners:
+        closest = np.sqrt(((hull_pts - img_corner)**2).sum(axis = 1))
+        closest_corners.append(hull_pts[np.argmin(closest)])
+    if closest_corners [2][1] - closest_corners[0][1] < min_length or closest_corners[3][1] -  closest_corners[1][1] < min_length:
+        raise ValueError("Panorama corners were estimated poorly")
+    return closest_corners
 
 def warp_panorama(img, thresh, corners, spline_pts, config):
     ###########################################################################
@@ -1240,18 +1186,12 @@ def warp_panorama(img, thresh, corners, spline_pts, config):
     #A mask to isolate each slice
     mask = np.zeros((thresh.shape[0], thresh.shape[1]), np.uint8)
     #Blank canvas where we will write our warped slices, we over allocate in size 
-    if config["stitching_direction"] == 'LEFT' or config["stitching_direction"] == 'RIGHT':
-        blank = np.zeros((height, np.sum(widths), 3))
-    else:
-        blank = np.zeros((np.sum(widths), height, 3))
+    blank = np.zeros((height, np.sum(widths), 3))
     for i in range(len(top_spline) - 1):
         #Corners of the sliced quadrilateral with top left, top right, bottom right, bottom left
         slice_corners = np.round(np.vstack((bottom_spline[i: i+2, :], np.flip(top_spline[i: i + 2,:], axis = 0))))
         warped = warp_slice(img, mask, slice_corners, widths[i], height)
-        if config["stitching_direction"] == 'LEFT' or config["stitching_direction"] == 'RIGHT':
-            blank[:,cumulative_widths[i]: cumulative_widths[i + 1]] = warped
-        else:
-            blank[cumulative_widths[i]: cumulative_widths[i + 1], :] = warped
+        blank[:,cumulative_widths[i]: cumulative_widths[i + 1]] = warped
     blank = np.flip(blank.astype(np.uint8), axis = 0) #adjust array to go back to OpenCV image coordinates (0 on top)
     return blank.astype(np.uint8)
 
@@ -1334,10 +1274,7 @@ def straighten_pano(img, width, min_length, config):
     ######################################
     #Slice the panorama  so the width of each slice is roughly 1.5x
     #the stitching dimension of a single image used in the panorama
-    if config["stitching_direction"] == 'LEFT' or config["stitching_direction"] == 'RIGHT':
-        spline_pts = int(thresh.shape[1]//width) #width = search distance
-    else:
-        int(thresh.shape[0]//width)
+    spline_pts = int(thresh.shape[1]//width) #width = search distance
     if spline_pts < 3:
         spline_pts = 3
     #Get panorama corners based on the vertical dimension of the panorama
@@ -1349,38 +1286,26 @@ def straighten_pano(img, width, min_length, config):
     rectangle_image = warp_panorama(img, thresh, all_corners, spline_pts, config)
     return rectangle_image
 
-def match_pano_scale(straightened_imgs, config):
+def match_pano_scale(straightened_imgs, search_distance, config):
     scaled_imgs = [straightened_imgs[0]]
     for i in range(len(straightened_imgs) - 1):
-        src_ht, _ = get_stitch_edge_heights(scaled_imgs[i], config)
-        _, dst_ht = get_stitch_edge_heights(straightened_imgs[i + 1], config)
+        src_ht, _ = get_stitch_edge_heights(scaled_imgs[i], search_distance, config)
+        _, dst_ht = get_stitch_edge_heights(straightened_imgs[i + 1], search_distance, config)
         scale_factor = src_ht/dst_ht
         scaled = cv2.resize(straightened_imgs[i + 1], dsize = None, fx = scale_factor, fy = scale_factor)
         scaled_imgs.append(scaled)
     return scaled_imgs
 
-def get_stitch_edge_heights(img, config):
+def get_stitch_edge_heights(img, search_distance, config):
     bw = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     ret, thresh = cv2.threshold(bw, 0, 255, 0) #separate black from non-black pixels
     thresh = (thresh/255) 
-    if config["stitching_direction"] == 'LEFT' or config["stitching_direction"] == 'RIGHT':
-        heights = np.sum(thresh, axis = 0)
-        #We get the height 25 pixels since small angles in warping
-        #can lead to edge effects
-        if config["stitching_direction"] == 'LEFT':
-            src_stitch_height = heights[25]
-            dst_stitch_height = heights[-25]
-        else:
-            src_stitch_height = heights[-25]
-            dst_stitch_height = heights[25]
-    else:
-        heights = np.sum(thresh, axis = 1)
-        if config["stitching_direction"] == 'UP':
-            src_stitch_height = heights[25]
-            dst_stitch_height = heights[-25]
-        else:
-            src_stitch_height = heights[-25]
-            dst_stitch_height = heights[25]
+    heights = np.sum(thresh, axis = 0)
+    #We get the height at the 1/5 the width of the original image width since small angles in warping
+    #can lead to edge effects
+    test_position = int(search_distance * 0.2)
+    src_stitch_height = heights[test_position]
+    dst_stitch_height = heights[-test_position]
     return src_stitch_height, dst_stitch_height
 
 def crop_panorama(panorama, config):
@@ -1390,22 +1315,14 @@ def crop_panorama(panorama, config):
     ##########################################################
     bw = cv2.cvtColor(panorama, cv2.COLOR_BGR2GRAY)
     ret, thresh = cv2.threshold(bw, 0, 255, 0) #separate black from non-black pixels
-    if config["stitching_direction"] == 'LEFT' or config["stitching_direction"] == 'RIGHT':
-        height = thresh.shape[0]
-        sums = np.sum(thresh, axis = 1)
-        max_sum = np.max(sums)
-        good_idx = np.where(sums >= 0.95*max_sum)[0]
-        start = np.min(good_idx)
-        stop = np.max(good_idx)
-        cropped = panorama[start:stop, :]
-    else:
-        height = thresh.shape[1]
-        sums = np.sum(thresh, axis = 0)
-        max_sum = np.max(sums)
-        good_idx = np.where(sums >= 0.95*max_sum)[0]
-        start = np.min(good_idx)
-        stop = np.max(good_idx)
-        cropped = panorama[:, start:stop,]
+    height = thresh.shape[0]
+    sums = np.sum(thresh, axis = 1)
+    max_sum = np.max(sums)
+    good_idx = np.where(sums >= 0.95*max_sum)[0]
+    start = np.min(good_idx)
+    stop = np.max(good_idx)
+    cropped = panorama[start:stop, :]
+
     #######################################################
     #Only crop if most of the panorama height is preserved#
     #######################################################
@@ -1422,8 +1339,10 @@ def batch_only(config_path):
     ##############################################
     config = load_config(config_path) #Load config
     #We assume that the only files in the batch_path are the panoramas
-    path = config["batch_path"] #This is not a standard part of the config file
-    batch_paths = [os.path.join(path, img_name) for img_name in os.listdir(path)]
+    parent_dir = os.path.dirname(os.path.normpath(config["image_directory"]))
+    output_dir = os.path.basename(os.path.normpath(config["image_directory"])) + '_output'
+    output_path = os.path.join(parent_dir, output_dir)
+    batch_paths = [os.path.join(output_path, img_name) for img_name in os.listdir(output_path)]
     #We sort the panoramas by their image id
     num = np.array([int((p.split("\\")[-1]).split("_")[0]) for p in batch_paths])
     sorted_indices = np.argsort(num)
@@ -1443,7 +1362,7 @@ def stitch_super_panorama(batch_paths, config):
     ##################################################
     batch_imgs = [cv2.imread(batch_path) for batch_path in batch_paths]
     #Create a uniform border around the panoramas to aid in straightening the images
-    bordered_imgs = [cv2.copyMakeBorder(batch_img, 100, 100, 100, 100, cv2.BORDER_CONSTANT) for batch_img in batch_imgs]
+    batch_imgs = [cv2.copyMakeBorder(batch_img, 100, 100, 100, 100, cv2.BORDER_CONSTANT) for batch_img in batch_imgs]
     #############################################################
     #Recover the original image dimensions used for the panorama#
     #############################################################
@@ -1451,6 +1370,15 @@ def stitch_super_panorama(batch_paths, config):
     image_paths = [os.path.join(dummy_path, img_name) for img_name in os.listdir(dummy_path)]
     image = cv2.imread(image_paths[0]) #load first image to get dimensions
     dummy_img = cv2.resize(image, dsize = None, fx = config["final_resolution"], fy = config["final_resolution"])
+    if config["stitching_direction"] == 'RIGHT':
+        #Flip image across vertical axis so the stitching edge is now on the left
+        dummy_img = cv2.flip(dummy_img, 1)
+    elif config["stitching_direction"] == 'UP':
+        #Rotate 90 degrees CCW so stitching edge is now on the left
+        dummy_img = cv2.rotate(dummy_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    elif config["stitching_direction"] == 'DOWN':
+        #Rotate 90 degrees CCW so stitching edge is now on the left
+        dummy_img = cv2.rotate(dummy_img, cv2.ROTATE_90_CLOCKWISE)
     img_xdim, img_ydim = dummy_img.shape[1], dummy_img.shape[0]
     img_dims = (img_xdim, img_ydim)
     ######################################################################
@@ -1460,16 +1388,13 @@ def stitch_super_panorama(batch_paths, config):
     #features in a search distance from the stitching ends.
     #Since subsequent panoramas overlap by one image, the relevant features should be within one
     #image width of the ends, but since these images may have a different scale or be rotated, we 
-    #search at 1.5x the original image width.
+    #search at 1.0x the original image width.
     #When finding the corners of each panorama, we use the height of the original images to help 
     #rule out edges that are too short, here we assume that the corners should be longer than half the
     #original image height
-    if config["stitching_direction"] == 'LEFT' or config["stitching_direction"] == 'RIGHT':
-        search_distance = int(img_dims[0] *1.5)
-        length = img_dims[1]*0.5
-    else:
-        search_distance = int(img_dims[1] *1.5)
-        length = img_dims[0]*0.5
+    search_distance = int(img_dims[0] *1.0)
+    length = img_dims[1]*0.5
+
     #################################
     #Straighten and resize panoramas#
     #################################
@@ -1481,22 +1406,20 @@ def stitch_super_panorama(batch_paths, config):
     #are normal to the camera movement. Since deviations of the camera orientation from the normal plane will cause curving
     #in the panoramas, we pre-straighten the panoramas to make the super panorama stitching easier
     print("Straightening panoramas...")
-    straightened_imgs = [straighten_pano(bordered_img, search_distance, length, config) for bordered_img in bordered_imgs]
-    scaled = match_pano_scale(straightened_imgs, config)
-    # for i, img in enumerate(straightened_imgs):
-    #     img_name = os.path.basename(batch_paths[i])
-    #     cv2.imwrite(os.path.join(config['straightened_path'], "straightened_"  + img_name), img)
+    adjusted_imgs = [straighten_pano(bordered_img, search_distance, length, config) for bordered_img in batch_imgs]
+    #Match scale across panoramas
+    adjusted_imgs = match_pano_scale(adjusted_imgs, search_distance, config)
     #Now pad the straightened images so the images are all of the same dimension in the non-stitching direction
-    padded_images, pad = adjust_panoramas(scaled, config)
+    adjusted_imgs = adjust_panoramas(adjusted_imgs, config)
+
     ########################################################################
     #Find features and matches between the ends of subsequent panoramas and#
     #then stitch them together without any rotation                        #
     ########################################################################
-    print("Matching panoramas...")
-    img_matches = match_panorama_features(padded_images, search_distance, pad, config)
-    cv_features, matches, img_keypoints = build_panorama_opencv_objects(padded_images, img_matches)
+    img_matches = match_panorama_features(adjusted_imgs, search_distance, config)
+    cv_features, matches, img_keypoints = build_panorama_opencv_objects(adjusted_imgs, img_matches)
     print("Stitching panoramas...")
-    super_panorama = affine_OpenCV_pipeline(padded_images, img_keypoints, True, config)
+    super_panorama = affine_OpenCV_pipeline(adjusted_imgs, img_keypoints, True, config)
     ###########################################################
     #Crop image to center the height of the panorama such that#
     #the cropped image has hardly any black space             #
@@ -1507,16 +1430,24 @@ def stitch_super_panorama(batch_paths, config):
     #Save final super panorama#
     ###########################
     print('Saving final panorama ...')
-    cv2.imwrite(os.path.join(config['output_dir'], "straightened_super_"  + config['output_filename']), super_panorama)
+    parent_dir = os.path.dirname(os.path.normpath(config["image_directory"]))
+    output_dir = os.path.basename(os.path.normpath(config["image_directory"])) + '_output'
+    output_path = os.path.join(parent_dir, output_dir)
+    output_filename = 'batch_' + os.path.basename(os.path.normpath(config["image_directory"])) + '.png'
+    cv2.imwrite(os.path.join(output_path, "straightened_super_"  + output_filename), super_panorama)
     
 def run_batches(config_path):
     ###################
     #Run full pipeline#
     ###################
     config = load_config(config_path) #Load config
-    if not os.path.exists(config["output_dir"]):
-        print("Creating ", config["output_dir"])
-        os.makedirs(config["output_dir"])
+    parent_dir = os.path.dirname(os.path.normpath(config["image_directory"]))
+    output_dir = os.path.basename(os.path.normpath(config["image_directory"])) + '_output'
+    output_path = os.path.join(parent_dir, output_dir)
+    output_filename = 'batch_' + os.path.basename(os.path.normpath(config["image_directory"])) + '.png'
+    if not os.path.exists(output_path):
+        print("Creating ", output_path)
+        os.makedirs(output_path)
     start_idx = 0 #The image to start stitching
     finished = False #True when you stitch the final image in the directory
     #Stores the img idx of the final image used in the batch and whether the stitching was successful
@@ -1542,7 +1473,7 @@ def run_batches(config_path):
     ######################################################################
     if np.all(list(batch_dict.values())):
         #Retrieve the batches of panoramas that were created
-        batch_paths = [os.path.join(config["output_dir"], str(i) + "_" + config["output_filename"]) for i in list(batch_dict.keys())]
+        batch_paths = [os.path.join(output_path, str(i) + "_" + output_filename) for i in list(batch_dict.keys())]
         #If there is more than one panorama, stitch the panoramas together
         if len(batch_paths) > 1:
             stitch_super_panorama(batch_paths, config)
@@ -1551,7 +1482,7 @@ def run_batches(config_path):
             if config["crop"]:
                 super_panorama = crop_panorama(batch_paths[0], config)
                 print('Saving final panorama ...')
-                cv2.imwrite(os.path.join(config['output_dir'], "super_"  + config['output_filename']), super_panorama)
+                cv2.imwrite(os.path.join(output_path, "super_"  + output_filename), super_panorama)
     else:
         print("Could not proceed due to failed panoramas")
 
