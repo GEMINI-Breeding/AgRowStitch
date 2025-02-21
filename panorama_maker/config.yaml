@@ -5,9 +5,9 @@
 #Intermediate files are saved in parent directory with suffix _output
 #Final panoramas are saved in parent directory in final_panoramas
 #To run on all subdirectories, specify parent_directory instead of image_directory
-#image_directory: "C:\\Users\\kazuy\\Documents\\GEMINI\\Panorama\\07_05_2024_B3_frames_10fps"
-parent_directory: "C:\\Users\\kazuy\\Documents\\GEMINI\\Panorama\\Image_directory"
-save_output: False #True, if False, delete intermediate files after finishing
+image_directory: "D:\\Frames\\subset_frames"
+#parent_directory: "D:\\Frames"
+save_output: True #True, if False, delete intermediate files after finishing
 
 ################
 #Image settings#
@@ -23,7 +23,7 @@ final_resolution: 1.0 #1.0 for native resolution
 seam_resolution: 0.15 #Lower values accelerate stitching process
 #The edge of the image that is stitched with the next image, will modify images so that stitching edge is LEFT
 stitching_direction: "LEFT" #("RIGHT", "UP", "DOWN")
-#Camera model used to make intermediate panoramas, spherical is recommended even for mostly affine images
+#Camera model used to make intermediate panoramas, spherical is recommended unless camera orientation is stable
 camera: "spherical" #("spherical", "partial affine")
 #Used on the final panorama, only works if the final panorama is relatively straight
 crop: False #True
@@ -42,8 +42,8 @@ scale_constraint: 0.25
 #Minimum number of inlier matches necessary to consider it a match, 20-50, should increase with max_reprojection_error
 min_inliers: 20
 #Maximum threshold for RANSAC to try to get min_inliers, 1-10, should increase with image noise and resolution
-max_RANSAC_thresh: 8
-#Exclude the worst keypoint matches based on LMEDS reprojection error
-refine: True #False
+max_RANSAC_thresh: 10
 #Number of pixels of reprojection error that the homography inliers can have to be considered a good match, 10-100, but should scale with resolution
-max_reprojection_error: 75.0
+#Lower reprojection error and RANSAC threshold will use more images and create shorter intermediate panoramas, so there is a tradeoff between
+#ghosting in intermediate panoramas (longer panoramas that skip more images) and more seams from connecting intermediate panoramas (through straighteneing)
+max_reprojection_error: 25

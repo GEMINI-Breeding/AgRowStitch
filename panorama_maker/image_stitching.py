@@ -134,27 +134,26 @@ def get_inliers(img_feats, img_paths, src_idx, dst_idx, img_dim, config):
                     ####################################################################################################
                     #Filter out what we believe to be the most non-planar points so that we can optimize the homography#
                     ####################################################################################################
-                    if config['refine']:
-                        #Once we have excluded extreme outliers, try to find the best points to use to find the final homography matrix.
-                        #Since RANSAC can quickly exclude points but may not find an optimal solution, even when the RANSAC threshold is low,
-                        #we try to remove outliers using a brute force method.
-                        """TO DO: This brute force method can probably be further optimized, but the cv2 implementation is fast enough
-                        that it is not currently a problem"""
-                        idx = np.arange(len(preselect_kp0)) #use to keep track of the final indices to keep
-                        idx = idx[:, None] #make column vector
-                        idx_kp0 = np.hstack((idx, preselect_kp0)) #add idx to the keypoints
-                        idx_kp1 = np.hstack((idx, preselect_kp1))
-                        maximum_removals = int(len(preselect_kp0) - config["min_inliers"])
-                        error_array = full_outlier_function(preselect_kp0, preselect_kp1, maximum_removals, config)
-                        if len(error_array) > 0:
-                            best_iterations = np.argmin(error_array[:,1]) #Find best number of points to remove to minimize mean error
-                            mean_error = error_array[best_iterations, 1]
-                        else:
-                            best_iterations = 0
-                        #Recreate the outlier removal to recover the optimal set of points
-                        idx_to_keep = incremental_outlier_removal(idx_kp0, idx_kp1, best_iterations, config)
-                        preselect_kp0, preselect_feat0 = preselect_kp0[idx_to_keep], preselect_feat0[idx_to_keep]
-                        preselect_kp1, preselect_feat1 = preselect_kp1[idx_to_keep], preselect_feat1[idx_to_keep]
+                    #Once we have excluded extreme outliers, try to find the best points to use to find the final homography matrix.
+                    #Since RANSAC can quickly exclude points but may not find an optimal solution, even when the RANSAC threshold is low,
+                    #we try to remove outliers using a brute force method.
+                    """TO DO: This brute force method can probably be further optimized, but the cv2 implementation is fast enough
+                    that it is not currently a problem"""
+                    idx = np.arange(len(preselect_kp0)) #use to keep track of the final indices to keep
+                    idx = idx[:, None] #make column vector
+                    idx_kp0 = np.hstack((idx, preselect_kp0)) #add idx to the keypoints
+                    idx_kp1 = np.hstack((idx, preselect_kp1))
+                    maximum_removals = int(len(preselect_kp0) - config["min_inliers"])
+                    error_array = full_outlier_function(preselect_kp0, preselect_kp1, maximum_removals, config)
+                    if len(error_array) > 0:
+                        best_iterations = np.argmin(error_array[:,1]) #Find best number of points to remove to minimize mean error
+                        mean_error = error_array[best_iterations, 1]
+                    else:
+                        best_iterations = 0
+                    #Recreate the outlier removal to recover the optimal set of points
+                    idx_to_keep = incremental_outlier_removal(idx_kp0, idx_kp1, best_iterations, config)
+                    preselect_kp0, preselect_feat0 = preselect_kp0[idx_to_keep], preselect_feat0[idx_to_keep]
+                    preselect_kp1, preselect_feat1 = preselect_kp1[idx_to_keep], preselect_feat1[idx_to_keep]
                         
                     ####################################
                     #Filter based on reprojection error#
@@ -326,20 +325,7 @@ def subset_images(image_paths, start_idx, config):
     cv_features = build_feature_objects(subset_image_paths, img_matches, subset_indices, config)
     return cv_features, subset_indices, img_matches, filtered
 
-def prepare_OpenCV_objects(start_idx, config):
-    #####################
-    #Read in image paths#
-    #####################
-    path = config["image_directory"]
-    image_paths = [os.path.join(path, img_name) for img_name in os.listdir(path)]
-    if start_idx == 0:
-        print('Found ', len(image_paths), ' images')
-        
-    ###############################################################################
-    #Get the features for the best subset of images using SuperPoint and LightGlue#
-    ###############################################################################
-    cv_features, subset_indices, img_matches, filtered = subset_images(image_paths, start_idx, config)
-    
+def OpenCV_match(cv_features, match_threshold, match_confidence):
     ############################
     #Calculate pairwise matches#
     ############################
@@ -366,27 +352,57 @@ def prepare_OpenCV_objects(start_idx, config):
             #we handpick keypoints and features that we know are good matches, it will not always
             #recognize that. This matcher uses Lowe's ratio test, where a low match_conf will allow more
             #points (I think this is a poor implementation or the documentation is wrong?).
-            #Default is 0.3. matches_confidece_thresh (sic) is the threshold over which a match is 
-            #considered a match, default is 3.0. If confident in the matches, set match_conf low to avoid
-            #excluding true matches.
+            #If confident in the matches, set match_conf low to avoid excluding true matches, default is 0.3.
+            #matches_confidece_thresh (sic) is the threshold over which a match is 
+            #considered a match, default is 3.0. In source if match confidence is > thresh, confidence is set to zero,
+            #where confidence is inliers / (8 + 0.3 * matches). This is meant to reject images that are too similar.
+            #Since this is not a problem for this implementation, we increase the threshold if there is failure based
+            #on matches being too good.
             matcher = cv2.detail.BestOf2NearestMatcher(try_use_gpu = False, match_conf = 0.1,
                                                          num_matches_thresh1 = 6, num_matches_thresh2 = 6,
-                                                           matches_confindece_thresh = 3.0)
+                                                           matches_confindece_thresh = match_threshold)
             #apply2 finds all pairwise matches and is accelerated by TBB, but we can beat that performance
             #serially by simply skipping most pairs
             match = matcher.apply(cv_features[i], cv_features[j])
             match.src_img_idx, match.dst_img_idx = i, j
         matches.append(match)
-
+    ########################
+    #Check match confidence#
+    ########################
     #If there is poor confidence across images the stitching may fail, consider changing
     #the confidence thresholds or the minimum number of inliers
     full_confidence_matrix = np.array([match.confidence for match in matches]).reshape(len(cv_features), len(cv_features))
     sequential_matches = np.array([full_confidence_matrix[i, i+1] for i in range(len(cv_features)-1)])
-    # print('Confidence values of subsequent images: ')
-    # print(sequential_matches)
+
     if len(np.where(sequential_matches == 0)[0]) > 0:
-        raise ValueError("Could not connect all images!")
+        if match_threshold == 3.0:
+            print("Could not match images with match confidence threshold ", match_threshold)
+            print("Retrying with higher threshold because the matches are likely rejected for being too good...")
+            return None
+        else: 
+            print('Confidence values of subsequent images: ')
+            print(sequential_matches)
+            raise ValueError("Could not connect all images!")
+    else:
+        return matches
+
+def prepare_OpenCV_objects(start_idx, config):
+    #####################
+    #Read in image paths#
+    #####################
+    path = config["image_directory"]
+    image_paths = [os.path.join(path, img_name) for img_name in os.listdir(path)]
+    if start_idx == 0:
+        print('Found ', len(image_paths), ' images')
         
+    ###############################################################################
+    #Get the features for the best subset of images using SuperPoint and LightGlue#
+    ###############################################################################
+    cv_features, subset_indices, img_matches, filtered = subset_images(image_paths, start_idx, config)
+    matches = OpenCV_match(cv_features, 3.0, 0.1)
+    if matches is None:
+        matches = OpenCV_match(cv_features, 100.0, 0.1)
+
     #######################################################################
     #Make list of the subset of images used and resize to final resolution#
     #######################################################################
@@ -829,6 +845,22 @@ def check_panorama(panorama, config):
     dim = np.sum(thresh, axis = 0)
     dim_ratio = np.max(dim)/np.median(dim)
     
+    #######################################
+    #Check if panorama has high distortion#
+    #######################################
+    #The corners of the panorama should make the shape of a rectangle
+    #If the vertical edges are much different in length, there was some distortion
+    #when making planar, so check if the corners form a rhombus
+    if config["camera"] == "spherical":
+        (top_left, top_right, bottom_right, bottom_left) = find_pano_corners(thresh, config)
+        top_length = top_right[0] - top_left[0]
+        bottom_length = bottom_right[0] - bottom_left[0]
+        if top_length <= bottom_length:
+            rhombus = top_length/bottom_length
+        else:
+            rhombus = bottom_length/top_length
+    else:
+        rhombus = 1.0
     ############################
     #Check if panorama has gaps#
     ############################
@@ -840,13 +872,15 @@ def check_panorama(panorama, config):
     ##############################################
     #Report whether the panorama passed the check#
     ##############################################
-    if len(contours) == 1 and dim_ratio < 1.5:
+    if len(contours) == 1 and (dim_ratio <= 1.5 and rhombus >= 0.8):
         return True
     else:
-        if len(contours) > 1.5:
+        if len(contours) > 1.0:
             print("Panorama is not continuous")
         if dim_ratio > 1.5:
             print("Aspect ratio of panorama is concerning")
+        if rhombus < 0.8:
+            print("Panorama seems distorted")
         return False
 
 def retry_panorama(start_idx, filtered, config):
@@ -863,6 +897,7 @@ def retry_panorama(start_idx, filtered, config):
         print("Retrying with relaxed error and inlier constraints...")
         config["max_reprojection_error"] *= 1.2
         config["min_inliers"] *= 0.8
+        config["max_RANSAC_thresh"] *= 1.2
         images, cv_features, matches, keypoint_dict, idx, filtered, finished = prepare_OpenCV_objects(start_idx, config)
         
         #If a spherical stitch is not possible, try with a partial affine stitch instead
@@ -880,6 +915,7 @@ def retry_panorama(start_idx, filtered, config):
         #Return parameters to original values since the dictionary is modified in place
         config["max_reprojection_error"] /= 1.2
         config["min_inliers"] /= 0.8
+        config["max_RANSAC_thresh"] /= 1.2
     else:
         ##########################################################################
         #If the panorama was filtered, it means that the constraints were met,   #
@@ -889,6 +925,7 @@ def retry_panorama(start_idx, filtered, config):
         print("Panorama is unreliable, retrying with stronger error and inlier constraints...")
         config["max_reprojection_error"] *= 0.8
         config["min_inliers"] *= 1.2
+        config["max_RANSAC_thresh"] *= 1.2
         images, cv_features, matches, keypoint_dict, idx, filtered, finished = prepare_OpenCV_objects(start_idx, config)
         #If a spherical stitch is not possible, try with a partial affine stitch instead
         if config["camera"] == "spherical":
@@ -905,6 +942,7 @@ def retry_panorama(start_idx, filtered, config):
         #Return parameters to original values since the dictionary is modified in place
         config["max_reprojection_error"] /= 0.8
         config["min_inliers"] /= 1.2
+        config["max_RANSAC_thresh"] /= 1.2
         
     ###############################################
     #Check whether the new panorama was successful#
@@ -964,8 +1002,8 @@ def run_stitching_pipeline(start_idx, config):
         new_panorama, new_idx, new_finished = retry_panorama(start_idx, filtered, config)
         #Use new panorama if it passed the check
         if new_panorama is not None:
-            print(f'Saving image {idx} ...')
-            cv2.imwrite(os.path.join(config["output_path"], str(idx) + "_"  + output_filename), new_panorama)
+            print(f'Saving image {new_idx} ...')
+            cv2.imwrite(os.path.join(config["output_path"], str(new_idx) + "_"  + output_filename), new_panorama)
             return new_finished, new_idx, True
         #Otherwise, report a failure and continue
         else:
@@ -1123,7 +1161,7 @@ def adjust_panoramas(batch_imgs, config):
     padded_images = [cv2.copyMakeBorder(batch_imgs[i], 0, pad[i],  0, 0, cv2.BORDER_CONSTANT) for i in range(len(batch_imgs))]
     return padded_images
     
-def find_pano_corners(thresh, min_length, config):
+def find_pano_corners(thresh, config):
     #######################################################################
     #To find the corners of the panorama, we find the convex hull points  #
     #of the thresholded image that are closest to the corners of the image#
@@ -1142,7 +1180,16 @@ def find_pano_corners(thresh, min_length, config):
     for img_corner in all_corners:
         closest = np.sqrt(((hull_pts - img_corner)**2).sum(axis = 1))
         closest_corners.append(hull_pts[np.argmin(closest)])
-    if closest_corners [2][1] - closest_corners[0][1] < min_length or closest_corners[3][1] -  closest_corners[1][1] < min_length:
+    
+    #################################
+    #Check if corners are reasonable#
+    #################################
+    #When finding the corners of each panorama, we use the height of the original images to help 
+    #rule out edges that are too short, here we assume that the corners should be longer than half the
+    #original image height
+    min_length = config["img_dims"][1]*0.5
+    if closest_corners [3][1] - closest_corners[0][1] < min_length or closest_corners[2][1] -  closest_corners[1][1] < min_length:
+        print("top left, top right, bottom right, bottom left: ", closest_corners)
         raise ValueError("Panorama corners were estimated poorly")
     return closest_corners
 
@@ -1261,7 +1308,7 @@ def warp_slice(img, mask, slice_corners, width, height):
     warped = cv2.warpPerspective(rect_mask_bb, H, (width, height))
     return warped
 
-def straighten_pano(img, width, min_length, config):
+def straighten_pano(img, config):
     #############################################################
     #Straighten panorama by cutting it into quadrilateral slices#
     #and projecting them to rectangles                          #
@@ -1269,18 +1316,19 @@ def straighten_pano(img, width, min_length, config):
     #Threshold the image to make a mask of the panorama
     bw = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     ret, thresh = cv2.threshold(bw, 0, 255, 0) #Separate black from non-black pixels
-    
+
     ######################################
     #Get panorama corners and slice width#
     ######################################
-    #Slice the panorama  so the width of each slice is roughly 1.5x
+    #Slice the panorama so the width of each slice is roughly 1x
     #the stitching dimension of a single image used in the panorama
+    width = int(config["img_dims"][0] *1.0)
     spline_pts = int(thresh.shape[1]//width) #width = search distance
     if spline_pts < 3:
         spline_pts = 3
     #Get panorama corners based on the vertical dimension of the panorama
     #being at least min_length, where min_length = 0.5 height of original images
-    all_corners = find_pano_corners(thresh, min_length, config)
+    all_corners = find_pano_corners(thresh, config)
     
     ##########################
     #Slice and warp panorama#
@@ -1288,21 +1336,21 @@ def straighten_pano(img, width, min_length, config):
     rectangle_image = warp_panorama(img, thresh, all_corners, spline_pts, config)
     return rectangle_image
 
-def match_pano_scale(straightened_imgs, search_distance, config):
+def match_pano_scale(straightened_imgs, config):
     ###############################################################
     #Adjust panoramas so that stitching edges have the same height#
     #to match the scale across panoramas                          #
     ###############################################################
     scaled_imgs = [straightened_imgs[0]]
     for i in range(len(straightened_imgs) - 1):
-        src_ht, _ = get_stitch_edge_heights(scaled_imgs[i], search_distance, config)
-        _, dst_ht = get_stitch_edge_heights(straightened_imgs[i + 1], search_distance, config)
+        src_ht, _ = get_stitch_edge_heights(scaled_imgs[i], config)
+        _, dst_ht = get_stitch_edge_heights(straightened_imgs[i + 1], config)
         scale_factor = src_ht/dst_ht
         scaled = cv2.resize(straightened_imgs[i + 1], dsize = None, fx = scale_factor, fy = scale_factor)
         scaled_imgs.append(scaled)
     return scaled_imgs
 
-def get_stitch_edge_heights(img, search_distance, config):
+def get_stitch_edge_heights(img, config):
     #########################################
     #Find height of panorama stitching edges#
     #########################################
@@ -1312,7 +1360,8 @@ def get_stitch_edge_heights(img, search_distance, config):
     heights = np.sum(thresh, axis = 0)
     #We get the height at the 1/5 the width of the original image width since small angles in warping
     #can lead to edge effects
-    test_position = int(search_distance * 0.2)
+    width = config["img_dims"][0]
+    test_position = int(width * 0.2)
     src_stitch_height = heights[test_position]
     dst_stitch_height = heights[-test_position]
     return src_stitch_height, dst_stitch_height
@@ -1340,47 +1389,34 @@ def crop_panorama(panorama, config):
         print("Could not crop panorama because it is not straight. Consider loweing the batch size.")
         return panorama
     
-def batch_only(config_path):
+def batch_only(config):
     ##############################################
     #If the panoramas are already generated,     #
     #generate the super panorama from saved files#
     ##############################################
-    config = load_config(config_path) #Load config
+    stitch_super_panorama(config)
+    
+def stitch_super_panorama(config):
+    #######################################################################
+    #Take existing panoramas and stitch them into one final super panorama#
+    #######################################################################
+    if not os.path.exists(config["final_panorama_path"]):
+        print("Creating ", config["final_panorama_path"])
+        os.makedirs(config["final_panorama_path"])
+    print("Retrieving panoramas")
+    
+    ##################################################
+    #Read in the previously created panoramas and pad#
+    ##################################################
     #We assume that the only files in the batch_path are the panoramas
     batch_paths = [os.path.join(config["output_path"], img_name) for img_name in os.listdir(config["output_path"])]
     #We sort the panoramas by their image id
     num = np.array([int((p.split("\\")[-1]).split("_")[0]) for p in batch_paths])
     sorted_indices = np.argsort(num)
     sorted_batch_paths = [batch_paths[i] for i in sorted_indices]
-    #Then run the super stitcher
-    stitch_super_panorama(sorted_batch_paths, config)
-    
-def stitch_super_panorama(batch_paths, config):
-    #######################################################################
-    #Take existing panoramas and stitch them into one final super panorama#
-    #######################################################################
-    print('Disabling OpenCL to try to avoid memory issues')
-    cv2.ocl.setUseOpenCL(False)
-    print("Retrieving panoramas")
-    ##################################################
-    #Read in the previously created panoramas and pad#
-    ##################################################
-    batch_imgs = [cv2.imread(batch_path) for batch_path in batch_paths]
+    batch_imgs = [cv2.imread(batch_path) for batch_path in sorted_batch_paths]
     #Create a uniform border around the panoramas to aid in straightening the images
     batch_imgs = [cv2.copyMakeBorder(batch_img, 100, 100, 100, 100, cv2.BORDER_CONSTANT) for batch_img in batch_imgs]
-
-    ######################################################################
-    #Specify search distance and minimum expected height of each panorama#
-    ######################################################################
-    #To restrict feature matching to the stitching ends of the panoramas, we only search for 
-    #features in a search distance from the stitching ends.
-    #Since subsequent panoramas overlap by one image, the relevant features should be within one
-    #image width of the ends
-    #When finding the corners of each panorama, we use the height of the original images to help 
-    #rule out edges that are too short, here we assume that the corners should be longer than half the
-    #original image height
-    search_distance = int(config["img_dims"][0] *1.0)
-    length = config["img_dims"][1]*0.5
 
     #################################
     #Straighten and resize panoramas#
@@ -1393,9 +1429,9 @@ def stitch_super_panorama(batch_paths, config):
     #are normal to the camera movement. Since deviations of the camera orientation from the normal plane will cause curving
     #in the panoramas, we pre-straighten the panoramas to make the super panorama stitching easier
     print("Straightening panoramas...")
-    adjusted_imgs = [straighten_pano(bordered_img, search_distance, length, config) for bordered_img in batch_imgs]
+    adjusted_imgs = [straighten_pano(bordered_img, config) for bordered_img in batch_imgs]
     #Match scale across panoramas
-    adjusted_imgs = match_pano_scale(adjusted_imgs, search_distance, config)
+    adjusted_imgs = match_pano_scale(adjusted_imgs, config)
     #Now pad the straightened images so the images are all of the same dimension in the non-stitching direction
     adjusted_imgs = adjust_panoramas(adjusted_imgs, config)
 
@@ -1403,6 +1439,11 @@ def stitch_super_panorama(batch_paths, config):
     #Find features and matches between the ends of subsequent panoramas and#
     #then stitch them together without any rotation                        #
     ########################################################################
+    #To restrict feature matching to the stitching ends of the panoramas, we only search for 
+    #features in a search distance from the stitching ends.
+    #Since subsequent panoramas overlap by one image, the relevant features should be within one
+    #image width of the ends
+    search_distance = int(config["img_dims"][0] *1.0)
     img_matches = match_panorama_features(adjusted_imgs, search_distance, config)
     cv_features, matches, img_keypoints = build_panorama_opencv_objects(adjusted_imgs, img_matches)
     print("Stitching panoramas...")
@@ -1427,9 +1468,6 @@ def run_batches(config):
     ####################################
     #Prepare directory to store outputs#
     ####################################
-    if not os.path.exists(config["final_panorama_path"]):
-        print("Creating ", config["final_panorama_path"])
-        os.makedirs(config["final_panorama_path"])
     if not os.path.exists(config["output_path"]):
         print("Creating ", config["output_path"])
         os.makedirs(config["output_path"])
@@ -1467,13 +1505,12 @@ def run_batches(config):
     #the final super panorama.                                           #
     ######################################################################
     output_filename = 'batch_' + os.path.basename(os.path.normpath(config["image_directory"])) + '.png'
-    
     if np.all(list(batch_dict.values())):
         #Retrieve the batches of panoramas that were created
         batch_paths = [os.path.join(config["output_path"], str(i) + "_" + output_filename) for i in list(batch_dict.keys())]
         #If there is more than one panorama, stitch the panoramas together
         if len(batch_paths) > 1:
-            stitch_super_panorama(batch_paths, config)
+            stitch_super_panorama(config)
         #Otherwise, save the single panorama
         else:
             if config["crop"]:
@@ -1534,9 +1571,13 @@ def adjust_config(config, image_directory, parent_directory):
 
 def run(config_path):
     base_config = load_config(config_path)
+    print('Disabling OpenCL to try to avoid memory issues')
+    cv2.ocl.setUseOpenCL(False)
+    
     if "image_directory" in base_config:
         parent_directory = os.path.dirname(os.path.normpath(base_config["image_directory"]))
         config = adjust_config(base_config, base_config["image_directory"], parent_directory)
+        # batch_only(config)
         run_batches(config)
     elif "parent_directory" in base_config:
         subfolders = [ f.path for f in os.scandir(base_config["parent_directory"]) if f.is_dir()]
