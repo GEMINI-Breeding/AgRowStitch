@@ -17,28 +17,39 @@ import torch
 from torchvision import transforms
 import yaml
 
+def read_image(img_path, config):
+    image = cv2.imread(img_path) #Read image and then resize
+    xdim, ydim = image.shape[1], image.shape[0] #original dimensions
+    x_start, right, y_start, bottom = config["mask"]
+    x_end = int(xdim - right)
+    y_end = int(ydim - bottom)
+    #Crop out borders if there is a mask in the config
+    image = image[int(y_start):y_end, int(x_start):x_end]
+    image = cv2.resize(image, dsize = None, fx = config["final_resolution"], fy = config["final_resolution"])
+    
+    if config["stitching_direction"] == 'RIGHT':
+        #Flip image across vertical axis so the stitching edge is now on the left
+        image = cv2.flip(image, 1)
+    elif config["stitching_direction"] == 'UP':
+        #Rotate 90 degrees CCW so stitching edge is now on the left
+        image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    elif config["stitching_direction"] == 'DOWN':
+        #Rotate 90 degrees CCW so stitching edge is now on the left
+        image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+        
+    return image
 
 def extract_features(img_path, config):
     ##################################
     #Load image and reduce resolution#
     ##################################
-    image = cv2.imread(img_path) #Read image and then resize
-    medium_img = cv2.resize(image, dsize = None, fx = config["final_resolution"], fy = config["final_resolution"])
-    if config["stitching_direction"] == 'RIGHT':
-        #Flip image across vertical axis so the stitching edge is now on the left
-        medium_img = cv2.flip(medium_img, 1)
-    elif config["stitching_direction"] == 'UP':
-        #Rotate 90 degrees CCW so stitching edge is now on the left
-        medium_img = cv2.rotate(medium_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    elif config["stitching_direction"] == 'DOWN':
-        #Rotate 90 degrees CCW so stitching edge is now on the left
-        medium_img = cv2.rotate(medium_img, cv2.ROTATE_90_CLOCKWISE)
+    image = read_image(img_path, config)
 
     ####################################
     #Use SuperPoint to extract features#
     ####################################
     extractor = SuperPoint(max_num_keypoints=2048).eval().to(config["device"])
-    image_resized_tensor = transforms.ToTensor()(medium_img).to(config["device"]).unsqueeze(0)
+    image_resized_tensor = transforms.ToTensor()(image).to(config["device"]).unsqueeze(0)
     with torch.no_grad():
         feats = extractor.extract(image_resized_tensor)
         feats['scores'] = feats.get('scores', torch.ones((1, feats['keypoints'].shape[1]), device=feats['keypoints'].device))
@@ -292,17 +303,8 @@ def build_feature_objects(subset_image_paths, img_matches, subset_indices, confi
     #Convert the preselected SuperPoint keypoint and features into OpenCV objects#
     ##############################################################################
     cv_features = []
-    image = cv2.imread(subset_image_paths[0]) #load first image to get dimensions
-    dummy_img = cv2.resize(image, dsize = None, fx = config["final_resolution"], fy = config["final_resolution"])
-    if config["stitching_direction"] == 'RIGHT':
-        #Flip image across vertical axis so the stitching edge is now on the left
-        dummy_img = cv2.flip(dummy_img, 1)
-    elif config["stitching_direction"] == 'UP':
-        #Rotate 90 degrees CCW so stitching edge is now on the left
-        dummy_img = cv2.rotate(dummy_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    elif config["stitching_direction"] == 'DOWN':
-        #Rotate 90 degrees CCW so stitching edge is now on the left
-        dummy_img = cv2.rotate(dummy_img, cv2.ROTATE_90_CLOCKWISE)
+    dummy_img = read_image(subset_image_paths[0], config) #load first image to get dimensions
+
     #We pass dummy images since we are manually setting the info
     for idx in subset_indices:
         feat = cv2.detail.computeImageFeatures2(cv2.ORB.create(), dummy_img)
@@ -366,6 +368,7 @@ def OpenCV_match(cv_features, match_threshold, match_confidence):
             match = matcher.apply(cv_features[i], cv_features[j])
             match.src_img_idx, match.dst_img_idx = i, j
         matches.append(match)
+        
     ########################
     #Check match confidence#
     ########################
@@ -406,17 +409,7 @@ def prepare_OpenCV_objects(start_idx, config):
     #######################################################################
     #Make list of the subset of images used and resize to final resolution#
     #######################################################################
-    images = [cv2.resize(cv2.imread(image_paths[i]), dsize = None, fx = config["final_resolution"], fy = config["final_resolution"])
-                                   for i in subset_indices]
-    if config["stitching_direction"] == 'RIGHT':
-        #Flip image across vertical axis so the stitching edge is now on the left
-        images = [cv2.flip(image, 1) for image in images]
-    elif config["stitching_direction"] == 'UP':
-        #Rotate 90 degrees CCW so stitching edge is now on the left
-        images = [cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE) for image in images]
-    elif config["stitching_direction"] == 'DOWN':
-        #Rotate 90 degrees CCW so stitching edge is now on the left
-        images = [cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE) for image in images]
+    images = [read_image(image_paths[i], config) for i in subset_indices]
     
     ########################################################################################
     #Make a dictionary with the src and dst keypoints and features for the subset of images#
@@ -827,13 +820,31 @@ def blend_images(seam_masks, imgs, final_corners, final_sizes, blend_strength = 
     panorama = cv2.convertScaleAbs(blended)
     return panorama
 
+def threshold_image(image, pad):
+    ####################################################
+    #Threshold a color BGR image to black and white and#
+    #keep only the largest connected component         #
+    ####################################################
+    imgray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    ret, thresh = cv2.threshold(imgray, 0, 255, 0) #separate black from non-black pixels
+    thresh = cv2.copyMakeBorder(thresh, pad, pad, pad, pad, cv2.BORDER_CONSTANT) #add padding for corner finding
+    output = cv2.connectedComponentsWithStats(thresh, 8, cv2.CV_32S)
+    if output[0] > 1:
+        largest_object = np.max(output[2][1:, cv2.CC_STAT_AREA])
+        remove_labels = np.where(output[2][:, cv2.CC_STAT_AREA] < largest_object)[0]
+    else:
+        remove_labels = None
+    thresh = output[1]
+    thresh[np.isin(thresh, remove_labels)] = 0
+    thresh[thresh > 0] = 255
+    return np.uint8(thresh)
+
 def check_panorama(panorama, config):
     ####################################
     #Test for a major stitching failure#
     ####################################
-    #Threshold the panorama to check its shape
-    imgray = cv2.cvtColor(panorama, cv2.COLOR_BGR2GRAY)
-    ret, thresh = cv2.threshold(imgray, 0, 255, 0) #separate black from non-black pixels
+    #Threshold the panorama to check its shape, we add a pad around it for corner finding
+    thresh = threshold_image(panorama, 10)
     
     ##################
     #Check dimensions#
@@ -861,6 +872,7 @@ def check_panorama(panorama, config):
             rhombus = bottom_length/top_length
     else:
         rhombus = 1.0
+        
     ############################
     #Check if panorama has gaps#
     ############################
@@ -879,7 +891,8 @@ def check_panorama(panorama, config):
             print("Panorama is not continuous")
         if dim_ratio > 1.5:
             print("Aspect ratio of panorama is concerning")
-        if rhombus < 0.8:
+        #1:1.5 ratio threshold for top and bottom length to check for spherical distortion
+        if rhombus < 0.87:
             print("Panorama seems distorted")
         return False
 
@@ -1189,8 +1202,7 @@ def find_pano_corners(thresh, config):
     #original image height
     min_length = config["img_dims"][1]*0.5
     if closest_corners [3][1] - closest_corners[0][1] < min_length or closest_corners[2][1] -  closest_corners[1][1] < min_length:
-        print("top left, top right, bottom right, bottom left: ", closest_corners)
-        raise ValueError("Panorama corners were estimated poorly")
+        raise ValueError("Panorama corners were estimated poorly or the panorama is distorted")
     return closest_corners
 
 def warp_panorama(img, thresh, corners, spline_pts, config):
@@ -1314,9 +1326,8 @@ def straighten_pano(img, config):
     #and projecting them to rectangles                          #
     #############################################################
     #Threshold the image to make a mask of the panorama
-    bw = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    ret, thresh = cv2.threshold(bw, 0, 255, 0) #Separate black from non-black pixels
-
+    thresh = threshold_image(img, 0)
+    
     ######################################
     #Get panorama corners and slice width#
     ######################################
@@ -1354,8 +1365,7 @@ def get_stitch_edge_heights(img, config):
     #########################################
     #Find height of panorama stitching edges#
     #########################################
-    bw = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    ret, thresh = cv2.threshold(bw, 0, 255, 0) #separate black from non-black pixels
+    thresh = threshold_image(img, 0)
     thresh = (thresh/255) 
     heights = np.sum(thresh, axis = 0)
     #We get the height at the 1/5 the width of the original image width since small angles in warping
@@ -1371,8 +1381,7 @@ def crop_panorama(panorama, config):
     #This function will remove black space, but assumes that #
     #the panorama is already relatively straight.            #
     ##########################################################
-    bw = cv2.cvtColor(panorama, cv2.COLOR_BGR2GRAY)
-    ret, thresh = cv2.threshold(bw, 0, 255, 0) #separate black from non-black pixels
+    thresh = threshold_image(panorama, 0)
     sums = np.sum(thresh, axis = 1)
     max_sum = np.max(sums)
     good_idx = np.where(sums >= 0.95*max_sum)[0]
@@ -1553,17 +1562,7 @@ def adjust_config(config, image_directory, parent_directory):
     #############################################################
     dummy_path = config["image_directory"]
     image_paths = [os.path.join(dummy_path, img_name) for img_name in os.listdir(dummy_path)]
-    image = cv2.imread(image_paths[0]) #load first image to get dimensions
-    dummy_img = cv2.resize(image, dsize = None, fx = config["final_resolution"], fy = config["final_resolution"])
-    if config["stitching_direction"] == 'RIGHT':
-        #Flip image across vertical axis so the stitching edge is now on the left
-        dummy_img = cv2.flip(dummy_img, 1)
-    elif config["stitching_direction"] == 'UP':
-        #Rotate 90 degrees CCW so stitching edge is now on the left
-        dummy_img = cv2.rotate(dummy_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    elif config["stitching_direction"] == 'DOWN':
-        #Rotate 90 degrees CCW so stitching edge is now on the left
-        dummy_img = cv2.rotate(dummy_img, cv2.ROTATE_90_CLOCKWISE)
+    dummy_img = read_image(image_paths[0], config)
     img_xdim, img_ydim = dummy_img.shape[1], dummy_img.shape[0]
     config["img_dims"] = (img_xdim, img_ydim)
     print("Configuration loaded successfully...")

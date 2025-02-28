@@ -5,7 +5,7 @@
 #Intermediate files are saved in parent directory with suffix _output
 #Final panoramas are saved in parent directory in final_panoramas
 #To run on all subdirectories, specify parent_directory instead of image_directory
-image_directory: "D:\\Frames\\subset_frames"
+image_directory: "D:\\Frames\\07_22_2024_B3_frames_10fps"
 #parent_directory: "D:\\Frames"
 save_output: True #True, if False, delete intermediate files after finishing
 
@@ -23,6 +23,7 @@ final_resolution: 1.0 #1.0 for native resolution
 seam_resolution: 0.15 #Lower values accelerate stitching process
 #The edge of the image that is stitched with the next image, will modify images so that stitching edge is LEFT
 stitching_direction: "LEFT" #("RIGHT", "UP", "DOWN")
+mask: [0, 0, 0, 0] #Pixels to remove from original image edges (left edge, right edge, top edge, bottom edge)
 #Camera model used to make intermediate panoramas, spherical is recommended unless camera orientation is stable
 camera: "spherical" #("spherical", "partial affine")
 #Used on the final panorama, only works if the final panorama is relatively straight
@@ -36,7 +37,7 @@ keypoint_prop: 0.5 #Should by multiple of 0.1
 #Number of images ahead that can be stitched, should adjust based on image overlap
 forward_limit: 5
 #Minimum direction of travel/normal direction of travel in homography
-xy_ratio: 1.2
+xy_ratio: 1.2 #1.2
 #Maximum value that abs(scale-1) can take in homography
 scale_constraint: 0.25
 #Minimum number of inlier matches necessary to consider it a match, 20-50, should increase with max_reprojection_error
@@ -46,4 +47,4 @@ max_RANSAC_thresh: 10
 #Number of pixels of reprojection error that the homography inliers can have to be considered a good match, 10-100, but should scale with resolution
 #Lower reprojection error and RANSAC threshold will use more images and create shorter intermediate panoramas, so there is a tradeoff between
 #ghosting in intermediate panoramas (longer panoramas that skip more images) and more seams from connecting intermediate panoramas (through straighteneing)
-max_reprojection_error: 25
+max_reprojection_error: 50 #25
