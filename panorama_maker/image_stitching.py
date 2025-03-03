@@ -1527,13 +1527,22 @@ def run_batches(config):
             stitch_super_panorama(config)
         #Otherwise, save the single panorama
         else:
-            if config["crop"]:
-                super_panorama = crop_panorama(batch_paths[0], config)
+            super_panorama = batch_paths[0]
+            if config["straighten"]:
+                print("Straightening final panorama...")
+                super_panorama = straighten_pano(super_panorama, 4.0, config)
+                if config["crop"]:
+                    super_panorama = crop_panorama(super_panorama, config)
+                print('Saving straightened final panorama ...')
+                cv2.imwrite(os.path.join(config["final_panorama_path"], "straightened_" + config["final_panorama_name"]), super_panorama)
+            else:
+                if config["crop"]:
+                    super_panorama = crop_panorama(super_panorama, config)
                 print('Saving final panorama ...')
                 cv2.imwrite(os.path.join(config["final_panorama_path"], config["final_panorama_name"]), super_panorama)
-                if not config["save_output"]:
-                    print('Deleting intermediate images...')
-                    shutil.rmtree(config["output_path"])
+            if not config["save_output"]:
+                print('Deleting intermediate images...')
+                shutil.rmtree(config["output_path"])
     else:
         print("Could not proceed due to failed panoramas")
 
