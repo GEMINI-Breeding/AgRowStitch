@@ -355,17 +355,25 @@ def OpenCV_match(cv_features, match_threshold, match_confidence):
             #recognize that. This matcher uses Lowe's ratio test, where a low match_conf will allow more
             #points (I think this is a poor implementation or the documentation is wrong?).
             #If confident in the matches, set match_conf low to avoid excluding true matches, default is 0.3.
-            #matches_confidece_thresh (sic) is the threshold over which a match is 
-            #considered a match, default is 3.0. In source if match confidence is > thresh, confidence is set to zero,
-            #where confidence is inliers / (8 + 0.3 * matches). This is meant to reject images that are too similar.
-            #Since this is not a problem for this implementation, we increase the threshold if there is failure based
-            #on matches being too good.
             matcher = cv2.detail.BestOf2NearestMatcher(try_use_gpu = False, match_conf = 0.1,
                                                          num_matches_thresh1 = 6, num_matches_thresh2 = 6,
                                                            matches_confindece_thresh = match_threshold)
             #apply2 finds all pairwise matches and is accelerated by TBB, but we can beat that performance
             #serially by simply skipping most pairs
             match = matcher.apply(cv_features[i], cv_features[j])
+            if match.confidence < 0.1:
+                #matches_confidece_thresh (sic) is the threshold over which a match is 
+                #considered a match, default is 3.0. In source if match confidence is > thresh, confidence is set to zero,
+                #where confidence is inliers / (8 + 0.3 * matches). This is meant to reject images that are too similar.
+                #Since this is not a problem for this implementation, we increase the threshold if there is failure based
+                #on matches being too good. Unfortunately, it seems like this parameter cannot be set in the source and 3.0 is
+                #used regardless? This is commented out in the affine matcher, so we switch to the affine matcher if 
+                #the normal matcher return a confidence of 0.
+                matcher = cv2.detail_AffineBestOf2NearestMatcher(try_use_gpu = False, match_conf = 0.1,
+                                                             num_matches_thresh1 = 6)
+                match = matcher.apply(cv_features[i], cv_features[j])
+                if match.confidence < 0.1:
+                    raise ValueError("Could not connect all images! Images might be too similar?")
             match.src_img_idx, match.dst_img_idx = i, j
         matches.append(match)
         
@@ -374,20 +382,15 @@ def OpenCV_match(cv_features, match_threshold, match_confidence):
     ########################
     #If there is poor confidence across images the stitching may fail, consider changing
     #the confidence thresholds or the minimum number of inliers
-    full_confidence_matrix = np.array([match.confidence for match in matches]).reshape(len(cv_features), len(cv_features))
-    sequential_matches = np.array([full_confidence_matrix[i, i+1] for i in range(len(cv_features)-1)])
+    # full_confidence_matrix = np.array([match.confidence for match in matches]).reshape(len(cv_features), len(cv_features))
+    # sequential_matches = np.array([full_confidence_matrix[i, i+1] for i in range(len(cv_features)-1)])
 
-    if len(np.where(sequential_matches == 0)[0]) > 0:
-        if match_threshold == 3.0:
-            print("Could not match images with match confidence threshold ", match_threshold)
-            print("Retrying with higher threshold because the matches are likely rejected for being too good...")
-            return None
-        else: 
-            print('Confidence values of subsequent images: ')
-            print(sequential_matches)
-            raise ValueError("Could not connect all images!")
-    else:
-        return matches
+    # if len(np.where(sequential_matches == 0)[0]) > 0:
+    #     print("Could not match images with match confidence threshold ", match_threshold)
+    #     print('Confidence values of subsequent images: ')
+    #     print(sequential_matches)
+    #     raise ValueError("Could not connect all images! Images might be too similar.")
+    return matches
 
 def prepare_OpenCV_objects(start_idx, config):
     #####################
@@ -404,8 +407,6 @@ def prepare_OpenCV_objects(start_idx, config):
     ###############################################################################
     cv_features, subset_indices, img_matches, filtered = subset_images(image_paths, start_idx, config)
     matches = OpenCV_match(cv_features, 3.0, 0.1)
-    if matches is None:
-        matches = OpenCV_match(cv_features, 100.0, 0.1)
 
     #######################################################################
     #Make list of the subset of images used and resize to final resolution#
@@ -864,7 +865,7 @@ def check_panorama(panorama, config):
     #If the vertical edges are much different in length, there was some distortion
     #when making planar, so check if the corners form a rhombus
     if config["camera"] == "spherical":
-        (top_left, top_right, bottom_right, bottom_left) = find_pano_corners(thresh, config)
+        (top_left, top_right, bottom_right, bottom_left) = find_pano_corners(thresh, True, config)
         top_length = top_right[0] - top_left[0]
         bottom_length = bottom_right[0] - bottom_left[0]
         if top_length <= bottom_length:
@@ -1175,7 +1176,7 @@ def adjust_panoramas(batch_imgs, config):
     padded_images = [cv2.copyMakeBorder(batch_imgs[i], 0, pad[i],  0, 0, cv2.BORDER_CONSTANT) for i in range(len(batch_imgs))]
     return padded_images
     
-def find_pano_corners(thresh, config):
+def find_pano_corners(thresh, check, config):
     #######################################################################
     #To find the corners of the panorama, we find the convex hull points  #
     #of the thresholded image that are closest to the corners of the image#
@@ -1202,8 +1203,9 @@ def find_pano_corners(thresh, config):
     #rule out edges that are too short, here we assume that the corners should be longer than half the
     #original image height
     min_length = config["img_dims"][1]*0.5
-    if closest_corners [3][1] - closest_corners[0][1] < min_length or closest_corners[2][1] -  closest_corners[1][1] < min_length:
-        raise ValueError("Panorama corners were estimated poorly or the panorama is distorted")
+    if check:
+        if closest_corners [3][1] - closest_corners[0][1] < min_length or closest_corners[2][1] -  closest_corners[1][1] < min_length:
+            raise ValueError("Panorama corners were estimated poorly or the panorama is distorted")
     return closest_corners
 
 def warp_panorama(img, thresh, corners, spline_pts, config):
@@ -1340,7 +1342,7 @@ def straighten_pano(img, straighten_distance, config):
         spline_pts = 3
     #Get panorama corners based on the vertical dimension of the panorama
     #being at least min_length, where min_length = 0.5 height of original images
-    all_corners = find_pano_corners(thresh, config)
+    all_corners = find_pano_corners(thresh, False, config)
     
     ##########################
     #Slice and warp panorama#
