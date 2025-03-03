@@ -128,7 +128,7 @@ def get_inliers(img_feats, img_paths, src_idx, dst_idx, img_dim, config):
             ########################################
             if transformation_matrix is not None:
                 stitch_movement = transformation_matrix[0, 2]
-                forward_vs_lateral = abs(transformation_matrix[0,2]/transformation_matrix[1,2])
+                forward_vs_lateral = abs(transformation_matrix[0,2]/transformation_matrix[1,2] + 0.001)
                 scale = (transformation_matrix[0,0]**2 + transformation_matrix[1,0]**2)**0.5 #estimate scale factor
                 #We only want matches where the homography matrix indicates that there is positive movement in the
                 #stitching direction, there is more movement in the stitching direction that the normal, and that
@@ -394,7 +394,8 @@ def prepare_OpenCV_objects(start_idx, config):
     #Read in image paths#
     #####################
     path = config["image_directory"]
-    image_paths = [os.path.join(path, img_name) for img_name in os.listdir(path)]
+    image_types = ('.png', '.jpg', 'jpeg', '.tiff', 'tif', '.gif', '.img')
+    image_paths = [os.path.join(path, img_name) for img_name in os.listdir(path) if img_name.endswith(image_types)]
     if start_idx == 0:
         print('Found ', len(image_paths), ' images')
         
@@ -884,7 +885,7 @@ def check_panorama(panorama, config):
     ##############################################
     #Report whether the panorama passed the check#
     ##############################################
-    if len(contours) == 1 and (dim_ratio <= 1.5 and rhombus >= 0.8):
+    if len(contours) == 1 and (dim_ratio <= 1.5 and rhombus >= 0.85):
         return True
     else:
         if len(contours) > 1.0:
@@ -1320,7 +1321,7 @@ def warp_slice(img, mask, slice_corners, width, height):
     warped = cv2.warpPerspective(rect_mask_bb, H, (width, height))
     return warped
 
-def straighten_pano(img, config):
+def straighten_pano(img, straighten_distance, config):
     #############################################################
     #Straighten panorama by cutting it into quadrilateral slices#
     #and projecting them to rectangles                          #
@@ -1333,7 +1334,7 @@ def straighten_pano(img, config):
     ######################################
     #Slice the panorama so the width of each slice is roughly 1x
     #the stitching dimension of a single image used in the panorama
-    width = int(config["img_dims"][0] *1.0)
+    width = int(config["img_dims"][0] * straighten_distance)
     spline_pts = int(thresh.shape[1]//width) #width = search distance
     if spline_pts < 3:
         spline_pts = 3
@@ -1438,7 +1439,7 @@ def stitch_super_panorama(config):
     #are normal to the camera movement. Since deviations of the camera orientation from the normal plane will cause curving
     #in the panoramas, we pre-straighten the panoramas to make the super panorama stitching easier
     print("Straightening panoramas...")
-    adjusted_imgs = [straighten_pano(bordered_img, config) for bordered_img in batch_imgs]
+    adjusted_imgs = [straighten_pano(bordered_img, 1.0, config) for bordered_img in batch_imgs]
     #Match scale across panoramas
     adjusted_imgs = match_pano_scale(adjusted_imgs, config)
     #Now pad the straightened images so the images are all of the same dimension in the non-stitching direction
@@ -1458,17 +1459,21 @@ def stitch_super_panorama(config):
     print("Stitching panoramas...")
     super_panorama = affine_OpenCV_pipeline(adjusted_imgs, img_keypoints, True, config)
     
-    ###########################################################
-    #Crop image to center the height of the panorama such that#
-    #the cropped image has hardly any black space             #
-    ###########################################################
-    if config["crop"]:
-        super_panorama = crop_panorama(super_panorama, config)
     ###########################
     #Save final super panorama#
     ###########################
-    print('Saving final panorama ...')
-    cv2.imwrite(os.path.join(config["final_panorama_path"], config["final_panorama_name"]), super_panorama)
+    if config["straighten"]:
+        print("Straightening final panorama...")
+        super_panorama = straighten_pano(super_panorama, 4.0, config)
+        if config["crop"]:
+            super_panorama = crop_panorama(super_panorama, config)
+        print('Saving straightened final panorama ...')
+        cv2.imwrite(os.path.join(config["final_panorama_path"], "straightened_" + config["final_panorama_name"]), super_panorama)
+    else:
+        if config["crop"]:
+            super_panorama = crop_panorama(super_panorama, config)
+        print('Saving final panorama ...')
+        cv2.imwrite(os.path.join(config["final_panorama_path"], config["final_panorama_name"]), super_panorama)
     if not config["save_output"]:
         print('Deleting intermediate images...')
         shutil.rmtree(config["output_path"])
