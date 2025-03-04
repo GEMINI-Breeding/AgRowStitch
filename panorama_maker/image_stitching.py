@@ -15,6 +15,7 @@ import shutil
 import sys
 import torch
 from torchvision import transforms
+import warnings
 import yaml
 
 def read_image(img_path, config):
@@ -894,7 +895,7 @@ def check_panorama(panorama, config):
         if dim_ratio > 1.5:
             print("Aspect ratio of panorama is concerning")
         #1:1.5 ratio threshold for top and bottom length to check for spherical distortion
-        if rhombus < 0.87:
+        if rhombus < 0.85:
             print("Panorama seems distorted")
         return False
 
@@ -965,7 +966,9 @@ def retry_panorama(start_idx, filtered, config):
     if check_panorama(new_panorama, config):
         return new_panorama, idx, finished
     else:
-        return None, None, None
+        warnings.warn("Trying to proceed with a distorted panorama...")
+        return new_panorama, idx, finished
+        # return None, None, None
 
 def run_stitching_pipeline(start_idx, config):
     ###############################################################################
@@ -1020,7 +1023,7 @@ def run_stitching_pipeline(start_idx, config):
             print(f'Saving image {new_idx} ...')
             cv2.imwrite(os.path.join(config["output_path"], str(new_idx) + "_"  + output_filename), new_panorama)
             return new_finished, new_idx, True
-        #Otherwise, report a failure and continue
+        #Otherwise, report a failure and continue, currently not used and best attempt is saved
         else:
             return finished, idx, False
     
@@ -1040,10 +1043,16 @@ def extract_all_panorama_features(images, search_distance, config):
         #Crop images using OpenCV index of height, width, but when we get the
         #keypoints back they will be in width, height format
         width = image.shape[1]
-        src_img = image[:, :search_distance, :]
-        src_pad_array = np.array([0, 0])
-        dst_img = image[:, (width - search_distance ):(width), :]
-        dst_pad_array = np.array([width - search_distance , 0])
+        if search_distance >= width:
+            src_img = image[:, :, :]
+            dst_img = image[:, :, :]
+            src_pad_array = np.array([0, 0])
+            dst_pad_array = np.array([0, 0])
+        else:
+            src_img = image[:, :search_distance, :]
+            src_pad_array = np.array([0, 0])
+            dst_img = image[:, (width - search_distance ):width, :]
+            dst_pad_array = np.array([width - search_distance , 0])
 
         ####################################
         #Use SuperPoint to extract features#
@@ -1186,6 +1195,7 @@ def find_pano_corners(thresh, check, config):
     cnt_pts = contours[0].reshape(contours[0].shape[0], contours[0].shape[2])
     hull = cv2.convexHull(cnt_pts)
     hull_pts = hull.reshape(hull.shape[0], hull.shape[2])
+    hull_pts = np.array(hull_pts, dtype = np.float64) #convert to float64 to handle large numbers
     ymax, xmax = thresh.shape
     top_left = [0, 0]
     top_right = [xmax, 0]
@@ -1195,6 +1205,7 @@ def find_pano_corners(thresh, check, config):
     for img_corner in all_corners:
         closest = np.sqrt(((hull_pts - img_corner)**2).sum(axis = 1))
         closest_corners.append(hull_pts[np.argmin(closest)])
+    closest_corners = np.array(closest_corners, dtype = int)
     
     #################################
     #Check if corners are reasonable#
@@ -1243,14 +1254,12 @@ def warp_panorama(img, thresh, corners, spline_pts, config):
     #############################
     #Build straightened panorama#
     #############################
-    #A mask to isolate each slice
-    mask = np.zeros((thresh.shape[0], thresh.shape[1]), np.uint8)
     #Blank canvas where we will write our warped slices, we over allocate in size 
     blank = np.zeros((height, np.sum(widths), 3))
     for i in range(len(top_spline) - 1):
         #Corners of the sliced quadrilateral with top left, top right, bottom right, bottom left
-        slice_corners = np.round(np.vstack((bottom_spline[i: i+2, :], np.flip(top_spline[i: i + 2,:], axis = 0))))
-        warped = warp_slice(img, mask, slice_corners, widths[i], height)
+        slice_corners = np.round(np.vstack((bottom_spline[i: i + 2, :], np.flip(top_spline[i: i + 2,:], axis = 0))))
+        warped = warp_slice(img, slice_corners, widths[i], height)
         blank[:,cumulative_widths[i]: cumulative_widths[i + 1]] = warped
     blank = np.flip(blank.astype(np.uint8), axis = 0) #adjust array to go back to OpenCV image coordinates (0 on top)
     return blank.astype(np.uint8)
@@ -1277,7 +1286,7 @@ def make_border_splines(thresh, corners, spline_pts):
         if len(bottom) > 0:
             bottom_contour_pts.append([x, np.max(bottom)])
     bottom_contour_pts = np.array(bottom_contour_pts)
-    
+
     ########################################################
     #Convert points into curves parameterized by arc length#
     #then rebuild splines with evenly spaced points        #
@@ -1300,13 +1309,15 @@ def make_border_splines(thresh, corners, spline_pts):
     bottom_spline = spl(uu)
     return top_spline, bottom_spline
 
-def warp_slice(img, mask, slice_corners, width, height):
+def warp_slice(img, slice_corners, width, height):
     ################################################
     #For a given quadrilateral slice of a panorama,#
     #warp into a rectangle                         #
     ################################################
-    #Mask everything but the slice
-    rect_mask = cv2.fillConvexPoly(mask, slice_corners.reshape((-1, 1, 2)).astype(np.int32), 255)
+    #A mask to isolate each slice, passed each time because modified in place with fillConvexPoly
+    blank_mask = np.zeros((img.shape[0], img.shape[1]), np.uint8)
+    #Mask everything but the slice, fillConvexPoly modifies mask in place, so we pass a fresh copy each time
+    rect_mask = cv2.fillConvexPoly(blank_mask, slice_corners.reshape((-1, 1, 2)).astype(np.int32), 255)
     rect_img = cv2.bitwise_and(img, img, mask=rect_mask)
     #Resize the slice so it is in its in a rectangular bounding box
     rect_mask_corners = np.where(rect_mask == 255)
@@ -1323,23 +1334,24 @@ def warp_slice(img, mask, slice_corners, width, height):
     warped = cv2.warpPerspective(rect_mask_bb, H, (width, height))
     return warped
 
-def straighten_pano(img, straighten_distance, config):
+def straighten_pano(img, config):
     #############################################################
     #Straighten panorama by cutting it into quadrilateral slices#
     #and projecting them to rectangles                          #
     #############################################################
-    #Threshold the image to make a mask of the panorama
-    thresh = threshold_image(img, 0)
-    
+    #Pad the images and threshold to make a mask of the panorama
+    image = cv2.copyMakeBorder(img, 10, 10, 10, 10, cv2.BORDER_CONSTANT) #add padding for corner finding
+    thresh = threshold_image(image, 0)
+    width = int(config["img_dims"][0] * config["straighten_length"])
+
     ######################################
     #Get panorama corners and slice width#
     ######################################
     #Slice the panorama so the width of each slice is roughly 1x
     #the stitching dimension of a single image used in the panorama
-    width = int(config["img_dims"][0] * straighten_distance)
     spline_pts = int(thresh.shape[1]//width) #width = search distance
-    if spline_pts < 3:
-        spline_pts = 3
+    if spline_pts < 4:
+        spline_pts = 4
     #Get panorama corners based on the vertical dimension of the panorama
     #being at least min_length, where min_length = 0.5 height of original images
     all_corners = find_pano_corners(thresh, False, config)
@@ -1347,7 +1359,7 @@ def straighten_pano(img, straighten_distance, config):
     ##########################
     #Slice and warp panorama#
     #########################
-    rectangle_image = warp_panorama(img, thresh, all_corners, spline_pts, config)
+    rectangle_image = warp_panorama(image, thresh, all_corners, spline_pts, config)
     return rectangle_image
 
 def match_pano_scale(straightened_imgs, config):
@@ -1441,7 +1453,7 @@ def stitch_super_panorama(config):
     #are normal to the camera movement. Since deviations of the camera orientation from the normal plane will cause curving
     #in the panoramas, we pre-straighten the panoramas to make the super panorama stitching easier
     print("Straightening panoramas...")
-    adjusted_imgs = [straighten_pano(bordered_img, 1.0, config) for bordered_img in batch_imgs]
+    adjusted_imgs = [straighten_pano(bordered_img, config) for bordered_img in batch_imgs]
     #Match scale across panoramas
     adjusted_imgs = match_pano_scale(adjusted_imgs, config)
     #Now pad the straightened images so the images are all of the same dimension in the non-stitching direction
@@ -1464,9 +1476,9 @@ def stitch_super_panorama(config):
     ###########################
     #Save final super panorama#
     ###########################
-    if config["straighten"]:
+    if config["final_straighten"]:
         print("Straightening final panorama...")
-        super_panorama = straighten_pano(super_panorama, 4.0, config)
+        super_panorama = straighten_pano(super_panorama, config)
         if config["crop"]:
             super_panorama = crop_panorama(super_panorama, config)
         print('Saving straightened final panorama ...')
@@ -1530,9 +1542,9 @@ def run_batches(config):
         #Otherwise, save the single panorama
         else:
             super_panorama = batch_paths[0]
-            if config["straighten"]:
+            if config["final_straighten"]:
                 print("Straightening final panorama...")
-                super_panorama = straighten_pano(super_panorama, 4.0, config)
+                super_panorama = straighten_pano(super_panorama, config)
                 if config["crop"]:
                     super_panorama = crop_panorama(super_panorama, config)
                 print('Saving straightened final panorama ...')
@@ -1592,8 +1604,8 @@ def run(config_path):
     if "image_directory" in base_config:
         parent_directory = os.path.dirname(os.path.normpath(base_config["image_directory"]))
         config = adjust_config(base_config, base_config["image_directory"], parent_directory)
-        # batch_only(config)
-        run_batches(config)
+        batch_only(config)
+        # run_batches(config)
     elif "parent_directory" in base_config:
         subfolders = [ f.path for f in os.scandir(base_config["parent_directory"]) if f.is_dir()]
         print("Found ", len(subfolders), " subdirectories to process...")
