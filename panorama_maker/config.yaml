@@ -5,7 +5,7 @@
 #Intermediate files are saved in parent directory with suffix _output
 #Final panoramas are saved in parent directory in final_panoramas
 #To run on all subdirectories, specify parent_directory instead of image_directory
-image_directory: "D:\\Frames\\07_22_2024_B3_frames_10fps"
+image_directory: "D:\\T4_Data\\T4_GPS\\camA"
 #parent_directory: "D:\\Frames"
 save_output: True #True, if False, delete intermediate files after finishing
 
@@ -23,7 +23,7 @@ final_resolution: 1.0 #1.0 for native resolution
 seam_resolution: 0.15 #Lower values accelerate stitching process
 #The edge of the image that is stitched with the next image, will modify images so that stitching edge is LEFT
 stitching_direction: "LEFT" #("LEFT", "RIGHT", "UP", "DOWN")
-mask: [0, 0, 0, 0] #Pixels to remove from original image edges [left edge, right edge, top edge, bottom edge]
+mask: [640, 640, 0, 0] #Pixels to remove from original image edges [left edge, right edge, top edge, bottom edge]
 #Kaziga: [0, 0, 0, 0]; Amiga: [0, 0, 420, 0]; T4: [640, 640, 0, 0]; Dormant grapes: [0, 40, 500, 0]; Daytime grapes[0, 0, 300, 0]
 depth_filter: False #True or False, not supported yet
 #Camera model used to make intermediate panoramas, spherical is recommended unless camera orientation is stable
@@ -33,9 +33,9 @@ camera: "spherical" #("spherical", "partial affine")
 #Filter settings#
 #################
 #Starting range to filter how close the keypoints need to be to stitching edge, 1.0 to turn off, default 0.5
-keypoint_prop: 0.5 #Should by multiple of 0.1, 0.5
+keypoint_prop: 0.8 #Should by multiple of 0.1, 0.5
 #Number of images ahead that can be stitched, should adjust based on image overlap
-forward_limit: 3 #5
+forward_limit: 1 #5
 #Minimum direction of travel/normal direction of travel in homography
 xy_ratio: 1.2 #1.2
 #Maximum value that abs(scale-1) can take in homography
@@ -47,7 +47,7 @@ max_RANSAC_thresh: 10
 #Number of pixels of reprojection error that the homography inliers can have to be considered a good match, 10-100, but should scale with resolution
 #Lower reprojection error and RANSAC threshold will use more images and create shorter intermediate panoramas, so there is a tradeoff between
 #ghosting in intermediate panoramas (longer panoramas that skip more images) and more seams from connecting intermediate panoramas (through straighteneing)
-max_reprojection_error: 25 #20
+max_reprojection_error: 20 #20
 
 #################
 #Post Processing#
@@ -56,9 +56,10 @@ max_reprojection_error: 25 #20
 crop: False #True or False
 #The panorama batches and final panorama are straightened by adjusting slices that are a multiple of the original image resolution
 #Curvatures will be straightened more effectively with low straighten_length, but this also causes more staightening seams
-straighten_length: 1.0 #Straighten the panorama ever straigthen_length*image width pixels
+straighten_length: 1.0 #Straighten the panorama every straigthen_length*image width pixels at both batch and final stages
 #Straighten final panorama before saving
 final_straighten: True #True or False
 #In addition to saving the final panorama generated at final_resolution, save a smaller copy for viewing
-#Set to float 
+#Not supported yet
 save_low_resolution: True #True or False
+low_resolution: 0.1 #downscaling factor

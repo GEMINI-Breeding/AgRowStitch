@@ -377,20 +377,6 @@ def OpenCV_match(cv_features, match_threshold, match_confidence):
                     raise ValueError("Could not connect all images! Images might be too similar?")
             match.src_img_idx, match.dst_img_idx = i, j
         matches.append(match)
-        
-    ########################
-    #Check match confidence#
-    ########################
-    #If there is poor confidence across images the stitching may fail, consider changing
-    #the confidence thresholds or the minimum number of inliers
-    # full_confidence_matrix = np.array([match.confidence for match in matches]).reshape(len(cv_features), len(cv_features))
-    # sequential_matches = np.array([full_confidence_matrix[i, i+1] for i in range(len(cv_features)-1)])
-
-    # if len(np.where(sequential_matches == 0)[0]) > 0:
-    #     print("Could not match images with match confidence threshold ", match_threshold)
-    #     print('Confidence values of subsequent images: ')
-    #     print(sequential_matches)
-    #     raise ValueError("Could not connect all images! Images might be too similar.")
     return matches
 
 def prepare_OpenCV_objects(start_idx, config):
@@ -1220,49 +1206,65 @@ def find_pano_corners(thresh, check, config):
     return closest_corners
 
 def warp_panorama(img, thresh, corners, spline_pts, config):
-    ###########################################################################
-    #Slice the panorama into chunks and then warp those chunks into rectangles# 
-    #so we can recover a straightened panorama                                #
-    ###########################################################################
-    #Use splines to estimate the top and bottom edges of the panorama for smoother
-    #slicing
-    top_spline, bottom_spline = make_border_splines(thresh, corners, spline_pts)
-    #Now we find the length of the vectors that slice the panorama vertically
-    #and recalculate the end points so that the vectors are of equal length
-    top_bottom_distances = bottom_spline - top_spline
-    top_bottom_distances = np.sqrt((top_bottom_distances**2).sum(axis = 1))
-    #Calculate the minimum vector length, we choose the median here to protect
-    #against low minimum values due to poor corner attribution
-    min_distances = np.median(top_bottom_distances)//2
-    # height_ratio = top_bottom_distances/(2*min_distances)
-    mid_points = np.mean([bottom_spline, top_spline], axis = 0)
+    ################################################################
+    #If the panorama is not at least three straighten lengths wide,#
+    #warp it into a rectangle directly                             #
+    ################################################################
+    if spline_pts < 3:
+        rect_mask_corners = np.where(thresh == 255)
+        maxx, maxy, minx, miny = np.max(rect_mask_corners[0]), np.max(rect_mask_corners[1]), np.min(rect_mask_corners[0]),  np.min(rect_mask_corners[1])
+        #Get target points for a normal rectangle
+        width, height = maxy - miny, maxx - minx
+        rect_points = np.array([[0, 0], [width, 0], [width, height], [0, height]])
+        #Get perspective transform from corners to a rectangle and warp the slice
+        H = cv2.getPerspectiveTransform(corners.astype(np.float32), rect_points.astype(np.float32))
+        warped = cv2.warpPerspective(img, H, (width, height))
+        return warped
     
-    ###########################################
-    #Estimate straightened panorama dimensions#
-    ###########################################
-    #We calculate the width of the new panorama as the length of the line
-    #connecting all of the midpoints and the height to be the length of the 
-    #vertical slices
-    smd = np.sqrt(((mid_points[1:, :] - mid_points[:-1, :])**2).sum(axis = 1)) #Distances between mid points
-    smd = np.round(smd).astype(int)
-    height = int(2*min_distances)
-    #We take the width of each slice as the distance between mid points and assume that the scale 
-    #is already equalized from the original stitching process
-    widths = smd 
-    cumulative_widths = np.append(np.array([0]), np.cumsum(widths)).astype(int)
-    
-    #############################
-    #Build straightened panorama#
-    #############################
-    #Blank canvas where we will write our warped slices, we over allocate in size 
-    blank = np.zeros((height, np.sum(widths), 3))
-    for i in range(len(top_spline) - 1):
-        #Corners of the sliced quadrilateral with top left, top right, bottom right, bottom left
-        slice_corners = np.round(np.vstack((bottom_spline[i: i + 2, :], np.flip(top_spline[i: i + 2,:], axis = 0))))
-        warped = warp_slice(img, slice_corners, widths[i], height)
-        blank[:,cumulative_widths[i]: cumulative_widths[i + 1]] = warped
-    blank = np.flip(blank.astype(np.uint8), axis = 0) #adjust array to go back to OpenCV image coordinates (0 on top)
-    return blank.astype(np.uint8)
+    #############################################################################
+    #If the panorama is relatively long relative to the straighten length,      #
+    #slice it into sections based on its midline spline and then warp the slices#
+    #############################################################################
+    else:
+        #Use splines to estimate the top and bottom edges of the panorama for smoother
+        #slicing
+        top_spline, bottom_spline = make_border_splines(thresh, corners, spline_pts)
+        #Now we find the length of the vectors that slice the panorama vertically
+        #and recalculate the end points so that the vectors are of equal length
+        top_bottom_distances = bottom_spline - top_spline
+        top_bottom_distances = np.sqrt((top_bottom_distances**2).sum(axis = 1))
+        #Calculate the minimum vector length, we choose the median here to protect
+        #against low minimum values due to poor corner attribution
+        min_distances = np.median(top_bottom_distances)//2
+        # height_ratio = top_bottom_distances/(2*min_distances)
+        mid_points = np.mean([bottom_spline, top_spline], axis = 0)
+        
+        ###########################################
+        #Estimate straightened panorama dimensions#
+        ###########################################
+        #We calculate the width of the new panorama as the length of the line
+        #connecting all of the midpoints and the height to be the length of the 
+        #vertical slices
+        smd = np.sqrt(((mid_points[1:, :] - mid_points[:-1, :])**2).sum(axis = 1)) #Distances between mid points
+        smd = np.round(smd).astype(int)
+        height = int(2*min_distances)
+        #We take the width of each slice as the distance between mid points and assume that the scale 
+        #is already equalized from the original stitching process
+        widths = smd 
+        cumulative_widths = np.append(np.array([0]), np.cumsum(widths)).astype(int)
+        
+        #############################
+        #Build straightened panorama#
+        #############################
+        #Blank canvas where we will write our warped slices, we over allocate in size 
+        blank = np.zeros((height, np.sum(widths), 3))
+        for i in range(len(top_spline) - 1):
+            #Corners of the sliced quadrilateral with top left, top right, bottom right, bottom left
+            slice_corners = np.round(np.vstack((bottom_spline[i: i + 2, :], np.flip(top_spline[i: i + 2,:], axis = 0))))
+            warped = warp_slice(img, slice_corners, widths[i], height)
+            blank[:,cumulative_widths[i]: cumulative_widths[i + 1]] = warped
+        blank = np.flip(blank.astype(np.uint8), axis = 0) #adjust array to go back to OpenCV image coordinates (0 on top)
+        return blank.astype(np.uint8)
 
 def make_border_splines(thresh, corners, spline_pts):
     ###############################################################
@@ -1350,8 +1352,6 @@ def straighten_pano(img, config):
     #Slice the panorama so the width of each slice is roughly 1x
     #the stitching dimension of a single image used in the panorama
     spline_pts = int(thresh.shape[1]//width) #width = search distance
-    if spline_pts < 4:
-        spline_pts = 4
     #Get panorama corners based on the vertical dimension of the panorama
     #being at least min_length, where min_length = 0.5 height of original images
     all_corners = find_pano_corners(thresh, False, config)
@@ -1483,11 +1483,18 @@ def stitch_super_panorama(config):
             super_panorama = crop_panorama(super_panorama, config)
         print('Saving straightened final panorama ...')
         cv2.imwrite(os.path.join(config["final_panorama_path"], "straightened_" + config["final_panorama_name"]), super_panorama)
+        
     else:
         if config["crop"]:
             super_panorama = crop_panorama(super_panorama, config)
         print('Saving final panorama ...')
         cv2.imwrite(os.path.join(config["final_panorama_path"], config["final_panorama_name"]), super_panorama)
+        
+    if config["save_low_resolution"]:
+        print('Saving a low resolution version of the panorama ...')
+        super_panorama = cv2.resize(super_panorama, dsize = None, fx = config["low_resolution"], fy = config["low_resolution"])
+        cv2.imwrite(os.path.join(config["final_panorama_path"], "low_res_" + config["final_panorama_name"]), super_panorama)
+        
     if not config["save_output"]:
         print('Deleting intermediate images...')
         shutil.rmtree(config["output_path"])
@@ -1549,11 +1556,18 @@ def run_batches(config):
                     super_panorama = crop_panorama(super_panorama, config)
                 print('Saving straightened final panorama ...')
                 cv2.imwrite(os.path.join(config["final_panorama_path"], "straightened_" + config["final_panorama_name"]), super_panorama)
+                
             else:
                 if config["crop"]:
                     super_panorama = crop_panorama(super_panorama, config)
                 print('Saving final panorama ...')
                 cv2.imwrite(os.path.join(config["final_panorama_path"], config["final_panorama_name"]), super_panorama)
+                
+            if config["save_low_resolution"]:
+                print('Saving a low resolution version of the panorama ...')
+                super_panorama = cv2.resize(super_panorama, dsize = None, fx = config["low_resolution"], fy = config["low_resolution"])
+                cv2.imwrite(os.path.join(config["final_panorama_path"], "low_res_" + config["final_panorama_name"]), super_panorama)
+                
             if not config["save_output"]:
                 print('Deleting intermediate images...')
                 shutil.rmtree(config["output_path"])
