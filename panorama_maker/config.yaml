@@ -5,12 +5,10 @@
 #Intermediate files are saved in parent directory with suffix _output
 #Final panoramas are saved in parent directory in final_panoramas
 #To run on all subdirectories, specify parent_directory INSTEAD of image_directory
-image_directory: "D:\\T4_Data\\T4_GPS\\camA"
+image_directory: "D:\\T4_Data\\T4_GPS\\subset"
 #parent_directory: "D:\\Frames"
 #Save intermedite batch panoramas, necessary if using batch_only mode later
 save_output: True #True or False if False, delete intermediate files after finishing
-#If output is already saved, use batches to stitch final panorama by looking in _output 
-batch_only: False #True or False
 
 ################
 #Image settings#
@@ -30,8 +28,10 @@ mask: [640, 640, 0, 0] #Pixels to remove from original image edges [left edge, r
 #Kaziga: [0, 0, 0, 0]; Amiga: [0, 0, 420, 0]; T4: [640, 640, 0, 0]; Dormant grapes: [0, 40, 500, 0]; Daytime grapes[0, 0, 300, 0]
 #Camera model used to make intermediate panoramas, spherical is recommended unless camera orientation is stable
 camera: "spherical" #("spherical", "partial affine")
-#If there is GPS information linked to each image, set to path to .csv to use where columns are image, latitude, longitude
-GPS: False #True or False, not supported yet
+#If there is GPS information linked to each image, there should be a "gps.csv" file in the image_directory
+#with columns "image", "latitude", and "longitude". An output file will be written in the final output path
+#with columns "image", "latitude", "longitude", "x", and "y", where (0,0) is the top left corner and x is the horizontal
+GPS: True #True or False
 
 #################
 #Filter settings#
@@ -60,7 +60,8 @@ max_reprojection_error: 20 #float
 #Straighten final panorama before saving, may be time intensive for high resolution
 final_straighten: True #True or False
 #Change the orientation of final panorama before saving, if False camera movement will be right to left (stitching edge left)
-change_orientation: False #"90CW", "90CCW", "180" for clockwise, counterclockwise, or reverse direction, "COMPASS" for NSEW orientation on screen if GPS is True
+#"COMPASS" for NSEW orientation on screen if GPS is True, which will assume beds are aligned with one cardinal direction
+change_orientation: False #False, "90CW", "90CCW", "180" for clockwise, counterclockwise, or reverse direction --  or "COMPASS" for North is up
 #Save final panorama at the final_resolution used for stitching
 save_final_resolution: True #True or False
 #Save a version of the final panorama scaled to a specific resolution

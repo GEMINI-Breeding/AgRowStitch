@@ -4,13 +4,13 @@ Created on Thu Dec 19 16:33:41 2024
 
 @author: Kaz Uyehara
 """
-import csv
 import cv2
 from lightglue import LightGlue, SuperPoint #git clone https://github.com/cvg/LightGlue.git && cd LightGlue
 from lightglue.utils import rbd
 import itertools
 import numpy as np
 import os
+import pandas as pd
 import scipy as sp
 import shutil
 import sys
@@ -1740,22 +1740,30 @@ def save_final_panorama(super_panorama, config):
     if not os.path.exists(config["final_panorama_path"]):
         print("Creating ", config["final_panorama_path"])
         os.makedirs(config["final_panorama_path"])
+        
     ############
     #Straighten#
     ############
     if config["final_straighten"]:
         print("Straightening final panorama...")
         super_panorama = straighten_pano(super_panorama, None, config)
+        
     ##################################
     #Extract registration information#
     ##################################
-    image_names = []
-    registration_points = []
-    for image, point in config["registration"].items():
-        image_names.append(image)
-        registration_points.append(point)
-    registration_points = np.array(registration_points)
-    
+    if config["GPS"]:
+        GPS_data = []
+        for image, point in config["registration"].items():
+            latitude = config["GPS_data"].loc[config["GPS_data"]["image"] == image, "latitude"].values[0]
+            longitude = config["GPS_data"].loc[config["GPS_data"]["image"] == image, "longitude"].values[0]
+            GPS_data.append([image, latitude, longitude, point[0], point[1]])
+        GPS_data = pd.DataFrame(GPS_data, columns = ["image", "latitude", "longitude", "x", "y"])
+    else:
+        GPS_data = []
+        for image, point in config["registration"].items():
+            GPS_data.append([image, point[0], point[1]])
+        GPS_data = pd.DataFrame(GPS_data, columns = ["image", "x", "y"])
+
     ##########
     #Reorient#
     ##########
@@ -1764,46 +1772,74 @@ def save_final_panorama(super_panorama, config):
         if config["change_orientation"] == '180':
             #Flip image across vertical axis so the stitching edge is now on the right
             super_panorama = cv2.flip(super_panorama, 1)
-            registration_points[:, 0] = super_panorama.shape[1] - registration_points[:, 0]
+            GPS_data["x"] = super_panorama.shape[1] - GPS_data["x"]
         elif config["change_orientation"] == '90CCW':
             #Rotate 90 degrees CCW so stitching edge is now on the bottom
             super_panorama = cv2.rotate(super_panorama, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            registration_points = np.fliplr(registration_points)
-            registration_points[:, 1] = super_panorama.shape[0] - registration_points[:, 1]
+            x_vals = GPS_data["x"].values
+            y_vals = GPS_data["y"].values
+            GPS_data["x"] = y_vals
+            GPS_data["y"] = x_vals
+            GPS_data["y"] = super_panorama.shape[0] - GPS_data["y"]
         elif config["change_orientation"] == '90CW':
             #Rotate 90 degrees CCW so stitching edge is now on the top
             super_panorama = cv2.rotate(super_panorama, cv2.ROTATE_90_CLOCKWISE)
-            registration_points = np.fliplr(registration_points)
-            registration_points[:, 0] = super_panorama.shape[1] - registration_points[:, 0]
+            x_vals = GPS_data["x"].values
+            y_vals = GPS_data["y"].values
+            GPS_data["x"] = y_vals
+            GPS_data["y"] = x_vals
+            GPS_data["x"] = super_panorama.shape[1] - GPS_data["x"]
         elif config["GPS"] is not False and config["change_orientation"] == 'COMPASS':
-            print("Compass not supported yet")
+            #Find major axis of movement
+            lat_travel = np.max(GPS_data["latitude"].values) - np.min(GPS_data["latitude"].values)
+            long_travel = np.max(GPS_data["longitude"].values) - np.min(GPS_data["longitude"].values)
+            if lat_travel > long_travel: #Bed is North-South
+                corr = np.corrcoef(GPS_data["x"].values, GPS_data["latitude"].values)[0, 1]
+                if corr > 0:
+                    #Left to Right is South to North, so turn 90CCW so Right is Top
+                    super_panorama = cv2.rotate(super_panorama, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    x_vals = GPS_data["x"].values
+                    y_vals = GPS_data["y"].values
+                    GPS_data["x"] = y_vals
+                    GPS_data["y"] = x_vals
+                    GPS_data["y"] = super_panorama.shape[0] - GPS_data["y"]
+                else:
+                    #Right to Left is North to South, so turn 90CW so Left is Top
+                    super_panorama = cv2.rotate(super_panorama, cv2.ROTATE_90_CLOCKWISE)
+                    x_vals = GPS_data["x"].values
+                    y_vals = GPS_data["y"].values
+                    GPS_data["x"] = y_vals
+                    GPS_data["y"] = x_vals
+                    GPS_data["x"] = super_panorama.shape[1] - GPS_data["x"]
+            else: #Bed is East-West
+                corr = np.corrcoef(GPS_data["x"].values, GPS_data["longitude"].values)[0, 1]
+                if corr < 0:
+                    #Left to Right is East to West, so flip 180 so Left is East
+                    super_panorama = cv2.flip(super_panorama, 1)
+                    GPS_data["x"] = super_panorama.shape[1] - GPS_data["x"]
         else:
             print("Invalid orientation")
             
     ############
     #Save files#
     ############
-    register_name = os.path.basename(os.path.normpath(config["image_directory"])) + "_registration.csv"
+    register_name = os.path.basename(os.path.normpath(config["image_directory"])) + "_gps_registration.csv"
     if config["save_final_resolution"]:
         print("Saving at final resolution...")
         cv2.imwrite(os.path.join(config["final_panorama_path"], "final_res_" + config["final_panorama_name"]), super_panorama)
-        with open (os.path.join(config["final_panorama_path"], "final_res_" + register_name), "w", newline = "") as registration_file:
-            writer = csv.writer(registration_file)
-            writer.writerow(["image", "x", "y"])
-            for row in range(len(image_names)):
-                writer.writerow([image_names[row], int(registration_points[row][0]), int(registration_points[row][1])])
-                
+        if config["GPS"]:
+            GPS_data.to_csv(os.path.join(config["final_panorama_path"], "final_res_" + register_name))
+            
     if config["save_resized_resolution"]:
         super_panorama, scalex, scaley, padx, pady = resize_panorama(super_panorama, config)
         print("Saving at resized resolution...")
         cv2.imwrite(os.path.join(config["final_panorama_path"], "resized_" + config["final_panorama_name"]), super_panorama)
-        registration_points *= np.array([scalex, scaley])
-        registration_points += np.array([padx, pady])
-        with open (os.path.join(config["final_panorama_path"], "resized_" + register_name), "w", newline = "") as registration_file:
-            writer = csv.writer(registration_file)
-            writer.writerow(["image", "x", "y"])
-            for row in range(len(image_names)):
-                writer.writerow([image_names[row], int(registration_points[row][0]), int(registration_points[row][1])])
+        GPS_data["x"] *= scalex
+        GPS_data["y"] *= scaley
+        GPS_data["x"] += padx
+        GPS_data["y"] *= pady
+        if config["GPS"]:
+            GPS_data.to_csv(os.path.join(config["final_panorama_path"], "resized_" + register_name))
                 
     if config["save_low_resolution"]:
         print('Saving a low resolution version of the panorama ...')
@@ -1892,6 +1928,13 @@ def adjust_config(config, image_directory, parent_directory):
     #Create dictionary for pixel registration#
     ##########################################
     config["registration"] = {}
+    if config["GPS"]:
+        gps_data = pd.read_csv(os.path.join(config["image_directory"], "gps.csv"),
+                               usecols = ["image", "latitude", "longitude"])
+        gps_data["x"] = np.zeros((len(gps_data)))
+        gps_data["y"] = np.zeros((len(gps_data)))
+        print("Found GPS data...")
+        config["GPS_data"] = gps_data
 
     print("Configuration loaded successfully...")
     return config
@@ -1917,10 +1960,7 @@ def run(config_path):
         for image_directory in subfolders:
             config = adjust_config(base_config, image_directory, parent_directory)
             try:
-                if config["batch_only"]:
-                    batch_only(config)
-                else:
-                    run_batches(config)
+                run_batches(config)
             except ValueError as e:
                 print(f"Error {e} caused failure for panorama {image_directory}")                
     else:
