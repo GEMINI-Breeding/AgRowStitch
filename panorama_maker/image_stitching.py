@@ -4,6 +4,7 @@ Created on Thu Dec 19 16:33:41 2024
 
 @author: Kaz Uyehara
 """
+import csv
 import cv2
 from lightglue import LightGlue, SuperPoint #git clone https://github.com/cvg/LightGlue.git && cd LightGlue
 from lightglue.utils import rbd
@@ -404,6 +405,8 @@ def prepare_OpenCV_objects(start_idx, config):
     #Make list of the subset of images used and resize to final resolution#
     #######################################################################
     images = [read_image(image_paths[i], config) for i in subset_indices]
+    image_names =  [img_name for img_name in os.listdir(path) if img_name.endswith(image_types)]
+    subset_image_names = [image_names[i] for i in subset_indices]
     
     ########################################################################################
     #Make a dictionary with the src and dst keypoints and features for the subset of images#
@@ -413,7 +416,7 @@ def prepare_OpenCV_objects(start_idx, config):
         finished = True
     else:
         finished = False
-    return images, cv_features, matches, subset_img_keypoints, subset_indices[-1],filtered, finished
+    return images, cv_features, matches, subset_img_keypoints, subset_indices[-1], filtered, finished, subset_image_names
 
 def spherical_OpenCV_pipeline(images, features, matches, config):
     #############################################################################################
@@ -426,8 +429,8 @@ def spherical_OpenCV_pipeline(images, features, matches, config):
     cameras = spherical_camera_estimation(features, matches, config)
     processed_images = spherical_warp_images(images, cameras, config)
     processed_images = get_seams(*processed_images)
-    panorama = blend_images(*processed_images)
-    return panorama
+    panorama, corners, sizes = blend_images(*processed_images)
+    return panorama, corners, sizes
 
 def bundle_affine_OpenCV_pipeline(images, features, matches, config):
     ############################################################################################
@@ -440,8 +443,8 @@ def bundle_affine_OpenCV_pipeline(images, features, matches, config):
     cameras = affine_camera_adjustment(features, matches, config)
     processed_images = affine_warp_images(images, cameras, config)
     processed_images = get_seams(*processed_images)
-    panorama = blend_images(*processed_images)
-    return panorama
+    panorama, corners, sizes = blend_images(*processed_images)
+    return panorama, corners, sizes
 
 def affine_OpenCV_pipeline(images, keypoint_dict, translation_only, config):
     #########################################################################
@@ -457,8 +460,8 @@ def affine_OpenCV_pipeline(images, keypoint_dict, translation_only, config):
         cameras = estimate_cameras(keypoint_dict, config)
     processed_images = affine_warp_images(images, cameras, config)
     processed_images = get_seams(*processed_images)
-    panorama = blend_images(*processed_images)
-    return panorama
+    panorama, corners, sizes = blend_images(*processed_images)
+    return panorama, corners, sizes
 
 def spherical_camera_estimation(features, matches, config):
     ###########################################################################
@@ -812,7 +815,12 @@ def blend_images(seam_masks, imgs, final_corners, final_sizes, blend_strength = 
         blender.feed(cv2.UMat(img.astype(np.int16)), mask, corner)
     blended, mask = blender.blend(None, None)
     panorama = cv2.convertScaleAbs(blended)
-    return panorama
+    
+    #Shift corner positions to be positive since the corners are currently centered
+    #on the middle image with top left corner 0,0 -- now in final global coordindates
+    positive_corners = np.array(final_corners, dtype = np.float64)
+    positive_corners = positive_corners - np.array([np.min(positive_corners[:,0]), np.min(positive_corners[:, 1])])
+    return panorama, positive_corners, np.array(final_sizes)
 
 def threshold_image(image, pad):
     ####################################################
@@ -905,20 +913,20 @@ def retry_panorama(start_idx, filtered, config):
         config["max_reprojection_error"] *= 1.2
         config["min_inliers"] *= 0.8
         config["max_RANSAC_thresh"] *= 1.2
-        images, cv_features, matches, keypoint_dict, idx, filtered, finished = prepare_OpenCV_objects(start_idx, config)
+        images, cv_features, matches, keypoint_dict, idx, filtered, finished, subset_image_names = prepare_OpenCV_objects(start_idx, config)
         
         #If a spherical stitch is not possible, try with a partial affine stitch instead
         if config["camera"] == "spherical":
             try:
-                new_panorama = spherical_OpenCV_pipeline(images, cv_features, matches, config)
+                new_panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
                 if not check_panorama(new_panorama, config):
                     print("Spherical stitching was unreliable, re-trying with partial affine...")
-                    new_panorama = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
+                    new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
             except:
                 print("Spherical stitching failed, re-trying with partial affine...")
-                new_panorama = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
+                new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
         else:
-            new_panorama = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
+            new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
         #Return parameters to original values since the dictionary is modified in place
         config["max_reprojection_error"] /= 1.2
         config["min_inliers"] /= 0.8
@@ -933,24 +941,33 @@ def retry_panorama(start_idx, filtered, config):
         config["max_reprojection_error"] *= 0.8
         config["min_inliers"] *= 1.2
         config["max_RANSAC_thresh"] *= 1.2
-        images, cv_features, matches, keypoint_dict, idx, filtered, finished = prepare_OpenCV_objects(start_idx, config)
+        images, cv_features, matches, keypoint_dict, idx, filtered, finished, subset_image_names = prepare_OpenCV_objects(start_idx, config)
         #If a spherical stitch is not possible, try with a partial affine stitch instead
         if config["camera"] == "spherical":
             try:
-                new_panorama = spherical_OpenCV_pipeline(images, cv_features, matches, config)
+                new_panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
                 if not check_panorama(new_panorama, config):
                     print("Spherical stitching was unreliable, re-trying with partial affine...")
-                    new_panorama = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
+                    new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
             except:
                 print("Spherical stitching failed, re-trying with partial affine...")
-                new_panorama = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
+                new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
         else:
-            new_panorama = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
+            new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
         #Return parameters to original values since the dictionary is modified in place
         config["max_reprojection_error"] /= 0.8
         config["min_inliers"] /= 1.2
         config["max_RANSAC_thresh"] /= 1.2
-        
+    
+    #########################################################
+    #Save center position of each image used in the panorama#
+    #########################################################
+    center_pixels = corners + sizes//2
+    batch_dict = {}
+    for image_name, position in zip(subset_images, center_pixels):
+        batch_dict[image_name] = position
+    config["registration"][idx] = batch_dict
+
     ###############################################
     #Check whether the new panorama was successful#
     ###############################################
@@ -959,7 +976,6 @@ def retry_panorama(start_idx, filtered, config):
     else:
         warnings.warn("Trying to proceed with a distorted panorama...")
         return new_panorama, idx, finished
-        # return None, None, None
 
 def run_stitching_pipeline(start_idx, config):
     ###############################################################################
@@ -967,24 +983,24 @@ def run_stitching_pipeline(start_idx, config):
     #when the number of stitched images reaches the batch size                    #
     ###############################################################################
     #Extract the features and matches between the minimal subset of images, which are now ready to be stitched
-    images, cv_features, matches, keypoint_dict, idx, filtered, finished = prepare_OpenCV_objects(start_idx, config)
+    images, cv_features, matches, keypoint_dict, idx, filtered, finished, subset_image_names = prepare_OpenCV_objects(start_idx, config)
     
     #########################################################################################
     #Spherical projection works best because of robust bundle adjustment and wave correction#
     #########################################################################################
     if config["camera"] == "spherical":
         try: #Since bundle adjustment can fail, we use a try/except statement
-            panorama = spherical_OpenCV_pipeline(images, cv_features, matches, config)
+            panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
             #If the panorama seems incorrect, use the same keypoints and try with a partial affine projection
             if not check_panorama(panorama, config):
                 print("Spherical stitching was unreliable, re-trying with partial affine...")
                 config["camera"] = "partial affine"
-                panorama = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
+                panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
                 config["camera"] = "spherical"
         except: #If bundle adjustment fails, fall back on a partial affine stitch with same keypoints instead
             print("Spherical stitching failed, re-trying with partial affine...")
             config["camera"] = "partial affine"
-            panorama = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
+            panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
             config["camera"] = "spherical"
             
     ##########################################################################################
@@ -993,30 +1009,32 @@ def run_stitching_pipeline(start_idx, config):
     #Homography and affine are not recommended because they can make unstable transformations#
     ##########################################################################################
     else:
-        panorama = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
+        panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
         
     ##############################################################################################
     #Check whether the panorama needs to be attempted again with different keypoints and features#
     ##############################################################################################
     output_filename = 'batch_' + os.path.basename(os.path.normpath(config["image_directory"])) + '.png'
     if check_panorama(panorama, config):
+        center_pixels = corners + sizes//2
+        batch_dict = {}
+        for image_name, position in zip(subset_image_names, center_pixels):
+            batch_dict[image_name] = position
+        config["registration"][idx] = batch_dict
         print(f'Saving image {idx} ...')
         cv2.imwrite(os.path.join(config["output_path"], str(idx) + "_"  + output_filename), panorama)
-        return finished, idx, True
+        return finished, idx
     else:
         ##############################################################
         #If the current constraints are unable to produce a panorama,#
         #try with modified constraints                               #
         ##############################################################
         new_panorama, new_idx, new_finished = retry_panorama(start_idx, filtered, config)
-        #Use new panorama if it passed the check
-        if new_panorama is not None:
-            print(f'Saving image {new_idx} ...')
-            cv2.imwrite(os.path.join(config["output_path"], str(new_idx) + "_"  + output_filename), new_panorama)
-            return new_finished, new_idx, True
-        #Otherwise, report a failure and continue, currently not used and best attempt is saved
-        else:
-            return finished, idx, False
+        #Use new panorama
+        print(f'Saving image {new_idx} ...')
+        cv2.imwrite(os.path.join(config["output_path"], str(new_idx) + "_"  + output_filename), new_panorama)
+        return new_finished, new_idx
+
     
 def extract_all_panorama_features(images, search_distance, config):
     ##################################################################
@@ -1285,6 +1303,9 @@ def divide_splines(top_spline, bottom_spline, mid_spline, spline_pts):
     #Slice the panorama at peaks and add in slice points#
     #in between peaks if the gaps are large             #
     #####################################################
+    #If the panorama is very long, we need more spline points so that the
+    #midline captures the panorama curvature and to avoid hitting the upper limit on
+    #OpenCV image size that can be used in warpPerspective (SHRT_MAX)
     threshold = 20
     spaced_idxs = [peak_idxs[0]]
     for i in range(1, len(peak_idxs)):
@@ -1309,7 +1330,7 @@ def divide_splines(top_spline, bottom_spline, mid_spline, spline_pts):
     #Return slice corners and widths as well as the final width and heigh to project into
     return corners, rectangular_width, rectangular_height, widths
 
-def warp_slice(img, slice_corners, width, height):
+def warp_slice(img, slice_corners, width, height, registration_dict, keys, offset, config):
     ################################################
     #For a given quadrilateral slice of a panorama,#
     #warp into a rectangle                         #
@@ -1321,17 +1342,30 @@ def warp_slice(img, slice_corners, width, height):
     rect_img = cv2.bitwise_and(img, img, mask=rect_mask)
     #Resize the slice so it is in its in a rectangular bounding box
     rect_mask_corners = np.where(rect_mask == 255)
-    maxx, maxy, minx, miny = np.max(rect_mask_corners[0]), np.max(rect_mask_corners[1]), np.min(rect_mask_corners[0]),  np.min(rect_mask_corners[1])
-    rect_mask_bb = rect_img[minx:maxx, miny:maxy]
+    maxy, maxx, miny, minx = np.max(rect_mask_corners[0]), np.max(rect_mask_corners[1]), np.min(rect_mask_corners[0]),  np.min(rect_mask_corners[1])
+    rect_mask_bb = rect_img[miny:maxy, minx:maxx]
     #Get target points for a normal rectangle
     rect_points = np.array([[0, 0], [width, 0], [width, height], [0, height]])
     #Translate the corners for a bounding box with top left corner at 0, 0
     translated_corners = np.copy(slice_corners)
-    translated_corners[:, 0] -= miny
-    translated_corners[:, 1] -= minx
+    translated_corners[:, 0] -= minx
+    translated_corners[:, 1] -= miny
     #Get perspective transform from slice to a rectangle and warp the slice
     H = cv2.getPerspectiveTransform(translated_corners.astype(np.float32), rect_points.astype(np.float32))
     warped = cv2.warpPerspective(rect_mask_bb, H, (width, height))
+    
+    ####################
+    #Warp registrations#
+    ####################
+    for i in range(len(keys)):
+        point = registration_dict[keys[i]].copy()
+        #Translate point to local slice coordinates
+        local_point = point - np.array([minx, miny])
+        warped_point = cv2.perspectiveTransform(np.reshape(local_point, (1, 1, 2)), H)[0][0]
+        #Translate back to global x coordinates by the global start of this slice
+        global_point = warped_point + np.array([offset, 0])
+        registration_dict[keys[i]] = global_point
+        
     return warped
 
 def smooth2D(pts, window):
@@ -1353,12 +1387,12 @@ def smooth1D(pts, window):
     smooth_x = np.convolve(x, np.ones((window,))/window, mode = 'valid')
     return smooth_x
 
-def warp_panorama(img, thresh, corners, spline_pts, config):
+def warp_panorama(img, thresh, corners, spline_pts, batch, config):
     ######################################
     #Get boundary of panorama and midline#
     ######################################
     top_spline, bottom_spline, mid_spline = make_border_splines(thresh, corners, spline_pts)
-    
+
     #############################################################
     #Slice panorama based on high curvature areas of the midline#
     #############################################################
@@ -1366,14 +1400,34 @@ def warp_panorama(img, thresh, corners, spline_pts, config):
     cumulative_widths = np.append(np.array([0]), np.cumsum(widths)).astype(int)
     #Blank canvas to project warped slices into
     blank = np.zeros((rectangular_height, rectangular_width, 3))
+    
+    ###########################################
+    #Link registration points with warp slices#
+    ###########################################
+    if batch is None:
+        #If straightening the final panorama, the registration is already merged across batches
+        registration_dict = config["registration"]
+    else:
+        #If straightening a batch, adjust the intrabatch_registration
+        my_batch = list(config["registration"].keys())[batch]
+        registration_dict = config["registration"][my_batch]
+    img_keys = list(registration_dict.keys())
+    positions = np.array(list(registration_dict.values())).copy()
+    x_positions = positions[:,0]
+    
+    ###########################
+    #Warp and place each slice#
+    ###########################
     for i in range(len(widths)):
+        key_idxs = np.where((x_positions >= cumulative_widths[i]) & (x_positions < cumulative_widths[i + 1]))[0]
+        keys = [img_keys[i] for i in key_idxs]
         #Corners of the sliced quadrilateral with top left, top right, bottom right, bottom left
-        slice_corners, width = all_slice_corners[i], widths[i]
-        warped = warp_slice(img, slice_corners, width, rectangular_height)
+        slice_corners, width, offset = all_slice_corners[i], widths[i], cumulative_widths[i]
+        warped = warp_slice(img, slice_corners, width, rectangular_height, registration_dict, keys, offset, config)
         blank[:,cumulative_widths[i]: cumulative_widths[i + 1]] = warped
     return blank.astype(np.uint8)
 
-def straighten_pano(img, config):
+def straighten_pano(img, batch, config):
     #############################################################
     #Straighten panorama by cutting it into quadrilateral slices#
     #and projecting them to rectangles                          #
@@ -1381,7 +1435,6 @@ def straighten_pano(img, config):
     #Pad the images and threshold to make a mask of the panorama
     image = cv2.copyMakeBorder(img, 10, 10, 10, 10, cv2.BORDER_CONSTANT) #add padding for corner finding
     thresh = threshold_image(image, 0)
-    # width = int(config["img_dims"][0] * config["straighten_length"])
     
     ############################################
     #Get panorama corners and spline resolution#
@@ -1392,24 +1445,13 @@ def straighten_pano(img, config):
     #The higher the image_widths (original image widths in the panorama),
     #the higher the aspect ratio (width:height) and the more points we need to capture the midline
     image_widths = round(thresh.shape[1]/config["img_dims"][0])
-    if  image_widths <= 4:
-        #We set 20 spline pts as the minimum number, this minimum must match
-        #the smoothing window used in divide_splines, we want at least 5 points per image width,
-        #but if there are too many points, the composited corners will cause
-        #spikes in the curvature that we would rather have smoothed out to capture
-        #the general trajectory of the panorama
-        spline_pts = 20
-    else:
-        #If the panorama is very long, we need more spline points so that the
-        #midline captures the panorama curvature and to avoid hitting the upper limit on
-        #OpenCV image size that can be used in warpPerspective (SHRT_MAX)
-        #These values can probably be better optimized and set dynamically rather than hardcoded
-        spline_pts = int(image_widths * 5)
-    
+    #Since we smooth the splines, we need some minimum number of points
+    spline_pts = max(5, int(image_widths * 5))
+
     ##########################
     #Slice and warp panorama#
     #########################
-    rectangle_image = warp_panorama(image, thresh, all_corners, spline_pts, config)
+    rectangle_image = warp_panorama(image, thresh, all_corners, spline_pts, batch, config)
     return rectangle_image
 
 def match_pano_scale(straightened_imgs, config):
@@ -1424,6 +1466,9 @@ def match_pano_scale(straightened_imgs, config):
         scale_factor = src_ht/dst_ht
         scaled = cv2.resize(straightened_imgs[i + 1], dsize = None, fx = scale_factor, fy = scale_factor)
         scaled_imgs.append(scaled)
+        batch = list(config["registration"].keys())[i]
+        for image, points in config["registration"][batch].items():
+            points *= scale_factor
     return scaled_imgs
 
 def get_stitch_edge_heights(img, config):
@@ -1476,6 +1521,9 @@ def crop_panorama(panorama, config):
         return panorama
     
 def resize_panorama(panorama, config):
+    #############################################
+    #Resize panorama according to config options#
+    #############################################
     width, height = config["final_size"]
     if width == 0 or height == 0:
         aspect_ratio = panorama.shape[1]/panorama.shape[0]
@@ -1484,6 +1532,7 @@ def resize_panorama(panorama, config):
         #################
         if width == 0 and height > 0:
             final_size = cv2.resize(panorama, (int(aspect_ratio * height) , height), interpolation=cv2.INTER_NEAREST)
+            scalex, scaley, padx, pady = int(aspect_ratio * height)/panorama.shape[1], height/panorama.shape[0], 0, 0
             ###############
             #Adjust width#
             ###############
@@ -1499,6 +1548,7 @@ def resize_panorama(panorama, config):
                     else:
                         start_x, stop_x = 1 + (current_width - crop_width)//2, (current_width - crop_width)//2
                     final_size = final_size[:, start_x:-stop_x, :]
+                    padx, pady = -start_x, 0
                 ####################
                 #Pad image to width#
                 ####################
@@ -1508,11 +1558,13 @@ def resize_panorama(panorama, config):
                     else:
                         left, right = (crop_width - current_width)//2, (crop_width - current_width)//2 + 1
                     final_size = cv2.copyMakeBorder(final_size, 0, 0, left, right, cv2.BORDER_CONSTANT)
+                    padx, pady = left, 0
         ################
         #Scale to width#
         ################
         elif height == 0 and width > 0:
             final_size = cv2.resize(panorama, (width, int(width/aspect_ratio)), interpolation=cv2.INTER_NEAREST)
+            scalex, scaley, padx, pady = width/panorama.shape[1], int(width/aspect_ratio)/panorama.shape[0], 0, 0
             ###############
             #Adjust height#
             ###############
@@ -1528,6 +1580,7 @@ def resize_panorama(panorama, config):
                     else:
                         start_y, stop_y = 1 + (current_height - crop_height)//2, (current_height - crop_height)//2
                     final_size = final_size[start_y: -stop_y, :, :]
+                    padx, pady = 0, -start_y
                 #####################
                 #Pad image to height#
                 #####################
@@ -1537,20 +1590,22 @@ def resize_panorama(panorama, config):
                     else:
                         top, bottom = (crop_height - current_height)//2, (crop_height - current_height)//2 + 1
                     final_size = cv2.copyMakeBorder(final_size, top, bottom, 0, 0, cv2.BORDER_CONSTANT)
+                    padx, pady = 0, top
         #############################
         #Invalid resizing parameters#
         #############################
         else:
             print("Invalid resizing parameters")
             final_size = panorama
-            
+            scalex, scaley, padx, pady = 1.0, 1.0, 0, 0
     #############
     #Full resize#
     #############
     else:
+        scalex, scaley, padx, pady = width/panorama.shape[1], height/panorama.shape[0], 0, 0
         final_size = cv2.resize(panorama, (width, height), interpolation=cv2.INTER_NEAREST)
         
-    return final_size
+    return final_size, scalex, scaley, padx, pady
     
 def batch_only(config):
     ##############################################
@@ -1563,23 +1618,19 @@ def stitch_super_panorama(config):
     #######################################################################
     #Take existing panoramas and stitch them into one final super panorama#
     #######################################################################
-    if not os.path.exists(config["final_panorama_path"]):
-        print("Creating ", config["final_panorama_path"])
-        os.makedirs(config["final_panorama_path"])
-    print("Retrieving panoramas")
+    print("Retrieving panoramas...")
     
     ##################################################
     #Read in the previously created panoramas and pad#
     ##################################################
     #We assume that the only files in the batch_path are the panoramas
-    batch_paths = [os.path.join(config["output_path"], img_name) for img_name in os.listdir(config["output_path"])]
+    image_types = ('.png', '.jpg', 'jpeg', '.tiff', 'tif', '.gif', '.img')
+    batch_paths = [os.path.join(config["output_path"], img_name) for img_name in os.listdir(config["output_path"]) if img_name.endswith(image_types)]
     #We sort the panoramas by their image id
     num = np.array([int((p.split("\\")[-1]).split("_")[0]) for p in batch_paths])
     sorted_indices = np.argsort(num)
     sorted_batch_paths = [batch_paths[i] for i in sorted_indices]
     batch_imgs = [cv2.imread(batch_path) for batch_path in sorted_batch_paths]
-    #Create a uniform border around the panoramas to aid in straightening the images
-    batch_imgs = [cv2.copyMakeBorder(batch_img, 100, 100, 100, 100, cv2.BORDER_CONSTANT) for batch_img in batch_imgs]
 
     #################################
     #Straighten and resize panoramas#
@@ -1592,7 +1643,7 @@ def stitch_super_panorama(config):
     #are normal to the camera movement. Since deviations of the camera orientation from the normal plane will cause curving
     #in the panoramas, we pre-straighten the panoramas to make the super panorama stitching easier
     print("Straightening panoramas...")
-    adjusted_imgs = [straighten_pano(bordered_img, config) for bordered_img in batch_imgs]
+    adjusted_imgs = [straighten_pano(image, i, config) for i, image in enumerate(batch_imgs)]
     #Match scale across panoramas
     adjusted_imgs = match_pano_scale(adjusted_imgs, config)
     #Now pad the straightened images so the images are all of the same dimension in the non-stitching direction
@@ -1610,7 +1661,23 @@ def stitch_super_panorama(config):
     img_matches = match_panorama_features(adjusted_imgs, search_distance, config)
     cv_features, matches, img_keypoints = build_panorama_opencv_objects(adjusted_imgs, img_matches)
     print("Stitching panoramas...")
-    super_panorama = affine_OpenCV_pipeline(adjusted_imgs, img_keypoints, True, config)
+    super_panorama, corners, sizes = affine_OpenCV_pipeline(adjusted_imgs, img_keypoints, True, config)
+    
+    #################################
+    #Register images in global space#
+    #################################
+    #Register the top left corners of batches in the superpanorama
+    interbatch_registration = {}
+    for image_name, corner in zip(np.sort(num), corners):
+        interbatch_registration[image_name] = corner
+    #Offset image registrations by the global corners of each batch
+    #in the super panorama space and take out batch dimension
+    global_registration = {}
+    for batch, batch_dict in config["registration"].items():
+        for image, point in batch_dict.items():
+            global_point = point + interbatch_registration[batch]
+            global_registration[image] = global_point
+    config["registration"] = global_registration
     
     ###########################
     #Save final super panorama#
@@ -1640,69 +1707,104 @@ def run_batches(config):
     ##############################################################
     start_idx = 0 #The image to start stitching
     finished = False #True when you stitch the final image in the directory
-    #Stores the img idx of the final image used in the batch and whether the stitching was successful
-    batch_dict = {}
+    batch_keys = [] #Stores the img idx of the final image used in the batch
     while not finished:
         #Create panoramas by first stitching batches of images
         #and starting a new stitch from the last image of the previous
         #panorama, leaving one image of overlap between each subsequent panorama
-        finished, start_idx, success = run_stitching_pipeline(start_idx, config)
-        batch_dict[start_idx] = success
+        finished, start_idx = run_stitching_pipeline(start_idx, config)
+        batch_keys.append(start_idx)
         
-    ###########################################################
-    #Determine if all of the images were stitched successfully#
-    ###########################################################
-    for key, outcome in batch_dict.items():
-        if outcome == False:
-            print(key, " panorama failed")
-            
     ######################################################################
     #If all panorama batches were successful, attempt to stitch them into#
     #the final super panorama.                                           #
     ######################################################################
     output_filename = 'batch_' + os.path.basename(os.path.normpath(config["image_directory"])) + '.png'
-    if np.all(list(batch_dict.values())):
-        #Retrieve the batches of panoramas that were created
-        batch_paths = [os.path.join(config["output_path"], str(i) + "_" + output_filename) for i in list(batch_dict.keys())]
+    #Retrieve the batches of panoramas that were created
+    batch_paths = [os.path.join(config["output_path"], str(i) + "_" + output_filename) for i in batch_keys]
+    if len(batch_paths) > 1:
         #If there is more than one panorama, stitch the panoramas together
-        if len(batch_paths) > 1:
-            stitch_super_panorama(config)
-        #Otherwise, save the single panorama
-        else:
-            super_panorama = batch_paths[0]
-            save_final_panorama(super_panorama, config)
-            if not config["save_output"]:
-                print('Deleting intermediate images...')
-                shutil.rmtree(config["output_path"])
+        stitch_super_panorama(config)
     else:
-        print("Could not proceed due to failed panoramas")
+        #Otherwise, save the single panorama
+        super_panorama = batch_paths[0]
+        save_final_panorama(super_panorama, config)
+        if not config["save_output"]:
+            print('Deleting intermediate images...')
+            shutil.rmtree(config["output_path"])
 
 def save_final_panorama(super_panorama, config):
+    ##############################
+    #Check that write path exists#
+    ##############################
+    if not os.path.exists(config["final_panorama_path"]):
+        print("Creating ", config["final_panorama_path"])
+        os.makedirs(config["final_panorama_path"])
+    ############
+    #Straighten#
+    ############
     if config["final_straighten"]:
         print("Straightening final panorama...")
-        super_panorama = straighten_pano(super_panorama, config)
+        super_panorama = straighten_pano(super_panorama, None, config)
+    ##################################
+    #Extract registration information#
+    ##################################
+    image_names = []
+    registration_points = []
+    for image, point in config["registration"].items():
+        image_names.append(image)
+        registration_points.append(point)
+    registration_points = np.array(registration_points)
+    
+    ##########
+    #Reorient#
+    ##########
     if config["change_orientation"] is not False:
         print("Re-orienting panorama...")
         if config["change_orientation"] == '180':
-            #Flip image across vertical axis so the stitching edge is now on the left
+            #Flip image across vertical axis so the stitching edge is now on the right
             super_panorama = cv2.flip(super_panorama, 1)
+            registration_points[:, 0] = super_panorama.shape[1] - registration_points[:, 0]
         elif config["change_orientation"] == '90CCW':
-            #Rotate 90 degrees CCW so stitching edge is now on the left
+            #Rotate 90 degrees CCW so stitching edge is now on the bottom
             super_panorama = cv2.rotate(super_panorama, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            registration_points = np.fliplr(registration_points)
+            registration_points[:, 1] = super_panorama.shape[0] - registration_points[:, 1]
         elif config["change_orientation"] == '90CW':
-            #Rotate 90 degrees CCW so stitching edge is now on the left
+            #Rotate 90 degrees CCW so stitching edge is now on the top
             super_panorama = cv2.rotate(super_panorama, cv2.ROTATE_90_CLOCKWISE)
+            registration_points = np.fliplr(registration_points)
+            registration_points[:, 0] = super_panorama.shape[1] - registration_points[:, 0]
         elif config["GPS"] is not False and config["change_orientation"] == 'COMPASS':
             print("Compass not supported yet")
         else:
             print("Invalid orientation")
+            
+    ############
+    #Save files#
+    ############
+    register_name = os.path.basename(os.path.normpath(config["image_directory"])) + "_registration.csv"
     if config["save_final_resolution"]:
         print("Saving at final resolution...")
         cv2.imwrite(os.path.join(config["final_panorama_path"], "final_res_" + config["final_panorama_name"]), super_panorama)
+        with open (os.path.join(config["final_panorama_path"], "final_res_" + register_name), "w", newline = "") as registration_file:
+            writer = csv.writer(registration_file)
+            writer.writerow(["image", "x", "y"])
+            for row in range(len(image_names)):
+                writer.writerow([image_names[row], int(registration_points[row][0]), int(registration_points[row][1])])
+                
     if config["save_resized_resolution"]:
-        super_panorama = resize_panorama(super_panorama, config)
+        super_panorama, scalex, scaley, padx, pady = resize_panorama(super_panorama, config)
         print("Saving at resized resolution...")
         cv2.imwrite(os.path.join(config["final_panorama_path"], "resized_" + config["final_panorama_name"]), super_panorama)
+        registration_points *= np.array([scalex, scaley])
+        registration_points += np.array([padx, pady])
+        with open (os.path.join(config["final_panorama_path"], "resized_" + register_name), "w", newline = "") as registration_file:
+            writer = csv.writer(registration_file)
+            writer.writerow(["image", "x", "y"])
+            for row in range(len(image_names)):
+                writer.writerow([image_names[row], int(registration_points[row][0]), int(registration_points[row][1])])
+                
     if config["save_low_resolution"]:
         print('Saving a low resolution version of the panorama ...')
         super_panorama = cv2.resize(super_panorama, dsize = None, fx = config["low_resolution"], fy = config["low_resolution"])
@@ -1785,6 +1887,12 @@ def adjust_config(config, image_directory, parent_directory):
     dummy_img = read_image(image_paths[0], config)
     img_xdim, img_ydim = dummy_img.shape[1], dummy_img.shape[0]
     config["img_dims"] = (img_xdim, img_ydim)
+    
+    ##########################################
+    #Create dictionary for pixel registration#
+    ##########################################
+    config["registration"] = {}
+
     print("Configuration loaded successfully...")
     return config
 
