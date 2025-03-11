@@ -964,7 +964,7 @@ def retry_panorama(start_idx, filtered, config):
     #########################################################
     center_pixels = corners + sizes//2
     batch_dict = {}
-    for image_name, position in zip(subset_images, center_pixels):
+    for image_name, position in zip(subset_image_names, center_pixels):
         batch_dict[image_name] = position
     config["registration"][idx] = batch_dict
 
@@ -1856,7 +1856,7 @@ def load_config(config_path):
     type_dict = {"image_directory": (str, None),
                  "parent_directory": (str, None),
                  "save_output": (bool, None),
-                 "batch_only": (bool, None),
+                 # "batch_only": (bool, None),
                  "device": (str, ["cuda", "cpu", "mps"]),
                  "batch_size": (int, None),
                  "final_resolution": ((int, float),  None),
@@ -1949,10 +1949,10 @@ def run(config_path):
     if "image_directory" in base_config:
         parent_directory = os.path.dirname(os.path.normpath(base_config["image_directory"]))
         config = adjust_config(base_config, base_config["image_directory"], parent_directory)
-        if  config["batch_only"]:
-            batch_only(config) #if you have batches saved and just want to work on generating final panorama
-        else:
-            run_batches(config)
+        # if  config["batch_only"]:
+        #     batch_only(config) #if you have batches saved and just want to work on generating final panorama
+        # else:
+        run_batches(config)
     elif "parent_directory" in base_config:
         subfolders = [ f.path for f in os.scandir(base_config["parent_directory"]) if f.is_dir()]
         print("Found ", len(subfolders), " subdirectories to process...")
