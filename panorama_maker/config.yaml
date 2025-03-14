@@ -39,7 +39,7 @@ GPS: False #True or False
 #Starting range to filter how close the keypoints need to be to stitching edge, 1.0 to turn off, default 0.5
 keypoint_prop: 0.5 #Should by multiple of 0.1, float in range 0.1 to 1.0
 #Number of images ahead that can be stitched, should adjust based on image overlap
-forward_limit: 2 #integer
+forward_limit: 4 #integer
 #Minimum direction of travel/normal direction of travel in homography
 xy_ratio: 1.2 #float
 #Maximum value that abs(scale-1) can take in homography
@@ -67,10 +67,10 @@ save_final_resolution: True #True or False
 #Save a version of the final panorama scaled to a specific resolution
 save_resized_resolution: True #True or False
 #Resize final panorama to fit specific dimensions or scale to fit one dimension
-final_size: [716280, 0] #[width, height] pixel dimensions where width is the dimension of camera movement, use zero if one dimension is free to maintain aspect ratio and the other is fixed, integers
+final_size: [71628, 0] #[width, height] pixel dimensions where width is the dimension of camera movement, use zero if one dimension is free to maintain aspect ratio and the other is fixed, integers
 #If the free dimension in final size should be cropped or padded to a specific pixel dimension, 0 for nothing
 crop_size: [0, 0] #integers
 #In addition to saving the final panorama generated at final_resolution, save a smaller copy for viewing
 #Save an additional low resolution image downscaled by the low_resolution factor, if image is resized, it will downscale on the resized image
-save_low_resolution: False #True or False
+save_low_resolution: True #True or False
 low_resolution: 0.1 #downscaling factor, float

@@ -1218,7 +1218,7 @@ def find_pano_corners(thresh, check, config):
             raise ValueError("Panorama corners were estimated poorly or the panorama is distorted")
     return closest_corners
 
-def make_border_splines(thresh, corners, spline_pts):
+def make_border_splines(thresh, corners, spline_pts, config):
     ###############################################################
     #Generate points along the top and bottom border of a panorama#
     ###############################################################
@@ -1241,30 +1241,77 @@ def make_border_splines(thresh, corners, spline_pts):
             bottom_contour_pts.append([x, np.max(bottom)])
     bottom_contour_pts = np.array(bottom_contour_pts)
     
-    ########################################################
-    #Convert points into curves parameterized by arc length#
-    #then rebuild splines with evenly spaced points        #
-    ########################################################
-    #Top contour
-    dp = top_contour_pts[1:, :] - top_contour_pts[:-1, :]      
-    l = (dp**2).sum(axis=1)       
-    top_vec = np.sqrt(l).cumsum()   
-    top_vec = np.r_[0, top_vec]
-    spl = sp.interpolate.make_interp_spline(top_vec, top_contour_pts, axis=0)
-    uu = np.linspace(top_vec[0], top_vec[-1], spline_pts)
-    top_spline = np.round(spl(uu))
-    #Bottom contour
-    dp = bottom_contour_pts[1:, :] - bottom_contour_pts[:-1, :]     
-    l = (dp**2).sum(axis=1)        
-    bottom_vec = np.sqrt(l).cumsum()   
-    bottom_vec = np.r_[0, bottom_vec]     
-    spl = sp.interpolate.make_interp_spline(bottom_vec, bottom_contour_pts, axis=0)
-    uu = np.linspace(bottom_vec[0], bottom_vec[-1], spline_pts)
-    bottom_spline = np.round(spl(uu))
+    #############################
+    #Convert points into splines#
+    #############################
+    top_spline = make_spline(top_contour_pts, spline_pts)
+    bottom_spline = make_spline(bottom_contour_pts, spline_pts)
     mid_spline = np.mean([top_spline, bottom_spline], axis = 0)
     return top_spline, bottom_spline, mid_spline
 
-def divide_splines(top_spline, bottom_spline, mid_spline, spline_pts):
+def make_smooth_border_splines(thresh, corners, spline_pts, config):
+    ###############################################################
+    #Generate points along the top and bottom border of a panorama#
+    ###############################################################
+    top_left, top_right, bottom_right, bottom_left = corners
+    
+    ############################################################
+    #Find the border points and smooth them over the full image#
+    #width and with a minimum height to avoid jagged borders   #
+    ############################################################
+    startx = max(top_left[0], bottom_left[0])
+    endx = min(top_right[0], bottom_right[0])
+    dim = np.sum(thresh, axis = 0)
+    height = np.min(dim[top_left[0]:top_right[0]])//255
+    height = int(height)
+    
+    ########################################################
+    #Go through each point and find splines that correspond#
+    #to the minumum height, we don't worry about top and   #
+    #bottom having different lengths because there should  #
+    #be low curvature                                      #
+    ########################################################
+    top, bottom = [], []
+    for x in range(startx, endx + 1):
+        pix = np.where(thresh[:, x] > 0)[0]
+        miny, maxy = np.min(pix), np.max(pix)
+        avgy = (miny+maxy)//2
+        minyt = avgy - height//2
+        maxyt = avgy + height//2
+        top.append([x, minyt])
+        bottom.append([x, maxyt])
+    top_contour_pts = np.array(top)
+    bottom_contour_pts = np.array(bottom)
+    
+    ###################################################
+    #Heavily smooth the contours to remove sharp edges#
+    ###################################################
+    top_contour_pts[:, 1] = smooth1D(top_contour_pts[:, 1], config["img_dims"][0])
+    bottom_contour_pts[:, 1] = smooth1D(bottom_contour_pts[:, 1], config["img_dims"][0])
+    
+    ######################################
+    #Convert smoothed points into splines#
+    ######################################
+    top_spline = make_spline(top_contour_pts, spline_pts)
+    bottom_spline = make_spline(bottom_contour_pts, spline_pts)
+    mid_spline = np.mean([top_spline, bottom_spline], axis = 0)
+    return top_spline, bottom_spline, mid_spline
+
+def make_spline(pts, spline_pts):
+    #######################################
+    #Convert 2D point set into spline with#
+    #set number of evenly spaced points   #
+    #######################################
+    dp = pts[1:, :] - pts[:-1, :] #Get vectors between points
+    l = (dp**2).sum(axis=1) #Get magnitude of vectors
+    top_vec = np.sqrt(l).cumsum() #Get magnitude of vectors 
+    top_vec = np.r_[0, top_vec] #Get distances traveled for 
+    spl = sp.interpolate.make_interp_spline(top_vec, pts, axis=0)
+    uu = np.linspace(top_vec[0], top_vec[-1], spline_pts)
+    spline = np.round(spl(uu))
+    return spline
+
+def divide_splines(top_spline, bottom_spline, mid_spline, spline_pts, max_space, peak, smooth, config):
     ############################################################################
     #We search the panorama boundary and midline splines for points of interest#
     #that we will use to divide the panorama into slices to warp               #
@@ -1281,9 +1328,13 @@ def divide_splines(top_spline, bottom_spline, mid_spline, spline_pts):
     #########################################################
     #Find sections of the midline that bend past a threshold#
     #########################################################
-    smooth_mid_spline = smooth2D(mid_spline, 5) #Smooth the midline with a rolling average
-    #Smooth the slope of the midline and then normalize it to the panorama height
-    smooth_dy =  smooth1D(np.gradient(smooth_mid_spline[:, 1]), 5)/rectangular_height
+    if smooth:
+        smooth_mid_spline = smooth2D(mid_spline, config["points_per_image"]) #Smooth the midline with a rolling average
+        #Smooth the slope of the midline and then normalize it to the panorama height
+        smooth_dy =  smooth1D(np.gradient(smooth_mid_spline[:, 1]), config["points_per_image"])/rectangular_height
+    else:
+        smooth_dy =  np.gradient(mid_spline[:, 1])/rectangular_height
+        
     #Normalize the slope by the fractional x traveled, i.e. the fraction of the width separating spline pts
     smooth_dy = smooth_dy/(rectangular_width/spline_pts)
     #Now find the acceleration to look for high curvature areas
@@ -1291,32 +1342,7 @@ def divide_splines(top_spline, bottom_spline, mid_spline, spline_pts):
     #The second derivative here is in normalized fractional width and height units and was set experimentally
     #using a couple of datasets to check.
     #We set a distance to avoid warping small sections
-    pos_peaks, _ = sp.signal.find_peaks(smooth_ddy, height = 2*10**-5, distance = 5)
-    neg_peaks, _ = sp.signal.find_peaks(-1*smooth_ddy, height = 2*10**-5, distance = 5)
-    peak_idxs = np.concatenate((pos_peaks, neg_peaks))
-    peak_idxs = np.sort(peak_idxs)
-    #Add first and last spline point
-    peak_idxs = np.insert(peak_idxs, 0, [0])
-    peak_idxs = np.append(peak_idxs, [len(top_spline) - 1])
-    
-    #####################################################
-    #Slice the panorama at peaks and add in slice points#
-    #in between peaks if the gaps are large             #
-    #####################################################
-    #If the panorama is very long, we need more spline points so that the
-    #midline captures the panorama curvature and to avoid hitting the upper limit on
-    #OpenCV image size that can be used in warpPerspective (SHRT_MAX)
-    threshold = 20
-    spaced_idxs = [peak_idxs[0]]
-    for i in range(1, len(peak_idxs)):
-        diff = peak_idxs[i] - peak_idxs[i-1]
-        if diff > threshold:
-            num_inserts = int(diff // threshold)
-            increment = diff / (num_inserts + 1)
-            for j in range(1, num_inserts + 1):
-                spaced_idxs.append(round(peak_idxs[i-1] + increment * j))
-        spaced_idxs.append(peak_idxs[i])
-    spaced_idxs = np.array(spaced_idxs)
+    spaced_idxs = find_peaks_ids(smooth_ddy, peak, max_space, config)
     
     ####################################
     #Calculate slice widths and corners#
@@ -1330,6 +1356,40 @@ def divide_splines(top_spline, bottom_spline, mid_spline, spline_pts):
     #Return slice corners and widths as well as the final width and heigh to project into
     return corners, rectangular_width, rectangular_height, widths
 
+def find_peaks_ids(smooth_ddy, peak, max_space, config):
+    #######################################################################
+    #Find areas with high curvature based on the second derivative        #
+    #of the vertical coordinates where the panorama should be sliced      #
+    #as well as periodic slice points so that there are no sections longer#
+    #than max_space                                                       #
+    #######################################################################
+    pos_peaks, _ = sp.signal.find_peaks(smooth_ddy, height = peak, distance = config["points_per_image"])
+    neg_peaks, _ = sp.signal.find_peaks(-1*smooth_ddy, height = peak, distance = config["points_per_image"])
+    peak_idxs = np.concatenate((pos_peaks, neg_peaks))
+    peak_idxs = np.sort(peak_idxs)
+    #Add first and last spline point
+    peak_idxs = np.insert(peak_idxs, 0, [0])
+    peak_idxs = np.append(peak_idxs, [len(smooth_ddy) - 1])
+    
+    #####################################################
+    #Slice the panorama at peaks and add in slice points#
+    #in between peaks if the gaps are large             #
+    #####################################################
+    #If the panorama is very long, we need more spline points so that the
+    #midline captures the panorama curvature and to avoid hitting the upper limit on
+    #OpenCV image size that can be used in warpPerspective (SHRT_MAX)
+    spaced_idxs = [peak_idxs[0]]
+    for i in range(1, len(peak_idxs)):
+        diff = peak_idxs[i] - peak_idxs[i-1]
+        if diff > max_space:
+            num_inserts = int(diff // max_space)
+            increment = diff / (num_inserts + 1)
+            for j in range(1, num_inserts + 1):
+                spaced_idxs.append(round(peak_idxs[i-1] + increment * j))
+        spaced_idxs.append(peak_idxs[i])
+    spaced_idxs = np.array(spaced_idxs)
+    return spaced_idxs
+    
 def warp_slice(img, slice_corners, width, height, registration_dict, keys, offset, config):
     ################################################
     #For a given quadrilateral slice of a panorama,#
@@ -1365,7 +1425,6 @@ def warp_slice(img, slice_corners, width, height, registration_dict, keys, offse
         #Translate back to global x coordinates by the global start of this slice
         global_point = warped_point + np.array([offset, 0])
         registration_dict[keys[i]] = global_point
-        
     return warped
 
 def smooth2D(pts, window):
@@ -1387,20 +1446,7 @@ def smooth1D(pts, window):
     smooth_x = np.convolve(x, np.ones((window,))/window, mode = 'valid')
     return smooth_x
 
-def warp_panorama(img, thresh, corners, spline_pts, batch, config):
-    ######################################
-    #Get boundary of panorama and midline#
-    ######################################
-    top_spline, bottom_spline, mid_spline = make_border_splines(thresh, corners, spline_pts)
-
-    #############################################################
-    #Slice panorama based on high curvature areas of the midline#
-    #############################################################
-    all_slice_corners, rectangular_width, rectangular_height, widths = divide_splines(top_spline, bottom_spline, mid_spline, spline_pts)
-    cumulative_widths = np.append(np.array([0]), np.cumsum(widths)).astype(int)
-    #Blank canvas to project warped slices into
-    blank = np.zeros((rectangular_height, rectangular_width, 3))
-    
+def warp_panorama(img, all_slice_corners, rectangular_width, rectangular_height, widths, batch, config):
     ###########################################
     #Link registration points with warp slices#
     ###########################################
@@ -1414,10 +1460,13 @@ def warp_panorama(img, thresh, corners, spline_pts, batch, config):
     img_keys = list(registration_dict.keys())
     positions = np.array(list(registration_dict.values())).copy()
     x_positions = positions[:,0]
-    
+    cumulative_widths = np.append(np.array([0]), np.cumsum(widths)).astype(int)
+
     ###########################
     #Warp and place each slice#
     ###########################
+    #Blank canvas to project warped slices into
+    blank = np.zeros((rectangular_height, rectangular_width, 3))
     for i in range(len(widths)):
         key_idxs = np.where((x_positions >= cumulative_widths[i]) & (x_positions < cumulative_widths[i + 1]))[0]
         keys = [img_keys[i] for i in key_idxs]
@@ -1442,16 +1491,40 @@ def straighten_pano(img, batch, config):
     #Get panorama corners based on the vertical dimension of the panorama
     #being at least min_length, where min_length = 0.5 height of original images
     all_corners = find_pano_corners(thresh, False, config)
+    
+    ##########################
+    #Calculate spline points#
+    #########################
     #The higher the image_widths (original image widths in the panorama),
     #the higher the aspect ratio (width:height) and the more points we need to capture the midline
     image_widths = round(thresh.shape[1]/config["img_dims"][0])
     #Since we smooth the splines, we need some minimum number of points
-    spline_pts = max(5, int(image_widths * 5))
-
+    spline_pts = max(config["points_per_image"], int(image_widths * config["points_per_image"]))
+    #Threshold past which another slice should be made, regardless of curvature
+    #in units of original image widths
+    spline_threshold = 4*config["points_per_image"]
+    
+    ##############################################################
+    #Link registration points with warp slices and get boundaries#
+    ##############################################################
+    if batch is None:
+        #Final straightening with smooth borders and low threshold for straightening
+        top_spline, bottom_spline, mid_spline = make_smooth_border_splines(thresh, all_corners, spline_pts, config)
+        peak = 1*10**-8
+        all_slice_corners, rectangular_width, rectangular_height, widths = divide_splines(top_spline, bottom_spline, mid_spline,
+                                                                                           spline_pts, spline_threshold, peak,
+                                                                                           False, config)
+    else:
+        #Batch straightening with rough borders and high threshold for straightening
+        top_spline, bottom_spline, mid_spline = make_border_splines(thresh, all_corners, spline_pts, config)
+        peak = 2*10**-5
+        all_slice_corners, rectangular_width, rectangular_height, widths = divide_splines(top_spline, bottom_spline, mid_spline,
+                                                                                          spline_pts, spline_threshold, peak,
+                                                                                          True, config)
     ##########################
     #Slice and warp panorama#
     #########################
-    rectangle_image = warp_panorama(image, thresh, all_corners, spline_pts, batch, config)
+    rectangle_image = warp_panorama(image, all_slice_corners, rectangular_width, rectangular_height, widths, batch, config)
     return rectangle_image
 
 def match_pano_scale(straightened_imgs, config):
@@ -1496,30 +1569,6 @@ def adjust_panoramas(batch_imgs, config):
     padded_images = [cv2.copyMakeBorder(batch_imgs[i], 0, pad[i],  0, 0, cv2.BORDER_CONSTANT) for i in range(len(batch_imgs))]
     return padded_images
 
-def crop_panorama(panorama, config):
-    ##########################################################
-    #This function will remove black space, but assumes that #
-    #the panorama is already relatively straight.            #
-    ##########################################################
-    #If the final panorama is straightened, this should be unnecessary,
-    #as the panorama will be warped to eliminate black space
-    thresh = threshold_image(panorama, 0)
-    sums = np.sum(thresh, axis = 1)
-    max_sum = np.max(sums)
-    good_idx = np.where(sums >= 0.95*max_sum)[0]
-    start = np.min(good_idx)
-    stop = np.max(good_idx)
-    cropped = panorama[start:stop, :]
-
-    #######################################################
-    #Only crop if most of the panorama height is preserved#
-    #######################################################
-    if stop - start > 0.75*config["img_dims"][1]:
-        return cropped
-    else:
-        print("Could not crop panorama because it is not straight. Consider loweing the batch size.")
-        return panorama
-    
 def resize_panorama(panorama, config):
     #############################################
     #Resize panorama according to config options#
@@ -1686,6 +1735,7 @@ def stitch_super_panorama(config):
     if not config["save_output"]:
         print('Deleting intermediate images...')
         shutil.rmtree(config["output_path"])
+    print("Done")
     
 def run_batches(config):
     ####################################
@@ -1727,11 +1777,13 @@ def run_batches(config):
         stitch_super_panorama(config)
     else:
         #Otherwise, save the single panorama
-        super_panorama = batch_paths[0]
+        super_panorama = cv2.imread(batch_paths[0])
+        config["registration"] = config["registration"][start_idx]
         save_final_panorama(super_panorama, config)
         if not config["save_output"]:
             print('Deleting intermediate images...')
             shutil.rmtree(config["output_path"])
+        print("Done")
 
 def save_final_panorama(super_panorama, config):
     ##############################
@@ -1740,14 +1792,12 @@ def save_final_panorama(super_panorama, config):
     if not os.path.exists(config["final_panorama_path"]):
         print("Creating ", config["final_panorama_path"])
         os.makedirs(config["final_panorama_path"])
-        
     ############
     #Straighten#
     ############
     if config["final_straighten"]:
         print("Straightening final panorama...")
         super_panorama = straighten_pano(super_panorama, None, config)
-        
     ##################################
     #Extract registration information#
     ##################################
@@ -1763,7 +1813,6 @@ def save_final_panorama(super_panorama, config):
         for image, point in config["registration"].items():
             GPS_data.append([image, point[0], point[1]])
         GPS_data = pd.DataFrame(GPS_data, columns = ["image", "x", "y"])
-
     ##########
     #Reorient#
     ##########
@@ -1829,7 +1878,6 @@ def save_final_panorama(super_panorama, config):
         cv2.imwrite(os.path.join(config["final_panorama_path"], "final_res_" + config["final_panorama_name"]), super_panorama)
         if config["GPS"]:
             GPS_data.to_csv(os.path.join(config["final_panorama_path"], "final_res_" + register_name))
-            
     if config["save_resized_resolution"]:
         super_panorama, scalex, scaley, padx, pady = resize_panorama(super_panorama, config)
         print("Saving at resized resolution...")
@@ -1840,7 +1888,6 @@ def save_final_panorama(super_panorama, config):
         GPS_data["y"] *= pady
         if config["GPS"]:
             GPS_data.to_csv(os.path.join(config["final_panorama_path"], "resized_" + register_name))
-                
     if config["save_low_resolution"]:
         print('Saving a low resolution version of the panorama ...')
         super_panorama = cv2.resize(super_panorama, dsize = None, fx = config["low_resolution"], fy = config["low_resolution"])
@@ -1923,6 +1970,8 @@ def adjust_config(config, image_directory, parent_directory):
     dummy_img = read_image(image_paths[0], config)
     img_xdim, img_ydim = dummy_img.shape[1], dummy_img.shape[0]
     config["img_dims"] = (img_xdim, img_ydim)
+    #Generate spline points for each original image width for straightening
+    config["points_per_image"] = 5
     
     ##########################################
     #Create dictionary for pixel registration#
@@ -1935,7 +1984,6 @@ def adjust_config(config, image_directory, parent_directory):
         gps_data["y"] = np.zeros((len(gps_data)))
         print("Found GPS data...")
         config["GPS_data"] = gps_data
-
     print("Configuration loaded successfully...")
     return config
 
