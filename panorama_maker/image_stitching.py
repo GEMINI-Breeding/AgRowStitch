@@ -11,6 +11,7 @@ import itertools
 import numpy as np
 import os
 import pandas as pd
+import re
 import scipy as sp
 import shutil
 import sys
@@ -392,6 +393,7 @@ def prepare_OpenCV_objects(start_idx, config):
     path = config["image_directory"]
     image_types = ('.png', '.jpg', 'jpeg', '.tiff', 'tif', '.gif', '.img')
     image_paths = [os.path.join(path, img_name) for img_name in os.listdir(path) if img_name.endswith(image_types)]
+    image_paths = sorted_nicely(image_paths)
     if start_idx == 0:
         print('Found ', len(image_paths), ' images')
         
@@ -1675,10 +1677,10 @@ def stitch_super_panorama(config):
     #We assume that the only files in the batch_path are the panoramas
     image_types = ('.png', '.jpg', 'jpeg', '.tiff', 'tif', '.gif', '.img')
     batch_paths = [os.path.join(config["output_path"], img_name) for img_name in os.listdir(config["output_path"]) if img_name.endswith(image_types)]
-    #We sort the panoramas by their image id
-    num = np.array([int((p.split("\\")[-1]).split("_")[0]) for p in batch_paths])
-    sorted_indices = np.argsort(num)
-    sorted_batch_paths = [batch_paths[i] for i in sorted_indices]
+    sorted_batch_paths = sorted_nicely(batch_paths)
+    #Keep the numbers associated with each batch for registration
+    filenames = [os.path.basename(path) for path in sorted_batch_paths]
+    num = np.array([int(file.split("_")[0]) for file in filenames])
     batch_imgs = [cv2.imread(batch_path) for batch_path in sorted_batch_paths]
 
     #################################
@@ -1892,7 +1894,19 @@ def save_final_panorama(super_panorama, config):
         print('Saving a low resolution version of the panorama ...')
         super_panorama = cv2.resize(super_panorama, dsize = None, fx = config["low_resolution"], fy = config["low_resolution"])
         cv2.imwrite(os.path.join(config["final_panorama_path"], "low_res_" + config["final_panorama_name"]), super_panorama)
-        
+
+
+def sorted_nicely(l): 
+    #################################################
+    #Sort file names the way humans would expect    #
+    #From Mark Byers 19.04.2010                     #
+    #https://stackoverflow.com/questions/           #
+    #2669059/how-to-sort-alpha-numeric-set-in-python#
+    #################################################
+    convert = lambda text: int(text) if text.isdigit() else text 
+    alphanum_key = lambda key: [ convert(c) for c in re.split('([0-9]+)', key) ] 
+    return sorted(l, key = alphanum_key)
+
 def load_config(config_path):
     ################################################################
     #Load configuration from a YAML file and compile regex patterns#
