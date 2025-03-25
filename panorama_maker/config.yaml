@@ -5,8 +5,8 @@
 #Intermediate files are saved in parent directory with suffix _output
 #Final panoramas are saved in parent directory in final_panoramas
 #To run on all subdirectories, specify parent_directory INSTEAD of image_directory
-image_directory: "D:\\Frames\\08_20_2024_B4_frames_10fps\\"
-#parent_directory: "D:\\Frames"
+image_directory: "D:\\T4_Data\\T4_GPS\\camA"
+#parent_directory: "D:\\Frames\\Repeat_Frames\\"
 #Save intermedite batch panoramas, necessary if using batch_only mode later
 save_output: True #True or False if False, delete intermediate files after finishing
 
@@ -23,15 +23,15 @@ final_resolution: 1.0 #1.0 for native resolution, float
 #Reduce resolution of final resolution by this amount to find seams
 seam_resolution: 0.15 #Lower values accelerate stitching process
 #The edge of the image that is stitched with the next image, will modify images so that stitching edge is LEFT
-stitching_direction: "LEFT" #("LEFT", "RIGHT", "UP", "DOWN")
-mask: [0, 0, 0, 0] #Pixels to remove from original image edges [left edge, right edge, top edge, bottom edge]
+stitching_direction: "UP" #("LEFT", "RIGHT", "UP", "DOWN")
+mask: [412, 412, 0, 0] #Pixels to remove from original image edges [left edge, right edge, top edge, bottom edge]
 #Kaziga: [0, 0, 0, 0]; Amiga: [0, 0, 420, 0]; T4: [640, 640, 0, 0]; Dormant grapes: [0, 40, 500, 0]; Daytime grapes[0, 0, 300, 0]
 #Camera model used to make intermediate panoramas, spherical is recommended unless camera orientation is stable
 camera: "spherical" #("spherical", "partial affine")
 #If there is GPS information linked to each image, there should be a "gps.csv" file in the image_directory
 #with columns "image", "latitude", and "longitude". An output file will be written in the final output path
 #with columns "image", "latitude", "longitude", "x", and "y", where (0,0) is the top left corner and x is the horizontal
-GPS: False #True or False
+GPS: True #True or False
 
 #################
 #Filter settings#
@@ -39,7 +39,7 @@ GPS: False #True or False
 #Starting range to filter how close the keypoints need to be to stitching edge, 1.0 to turn off, default 0.5
 keypoint_prop: 0.5 #Should by multiple of 0.1, float in range 0.1 to 1.0
 #Number of images ahead that can be stitched, should adjust based on image overlap
-forward_limit: 4 #integer
+forward_limit: 2 #integer
 #Minimum direction of travel/normal direction of travel in homography
 xy_ratio: 1.2 #float
 #Maximum value that abs(scale-1) can take in homography
@@ -52,7 +52,7 @@ max_RANSAC_thresh: 10 #float
 #Lower reprojection error and RANSAC threshold will use more images and create shorter intermediate panoramas, so there is a tradeoff between
 #ghosting in intermediate panoramas (longer panoramas that skip more images) and more seams from connecting intermediate panoramas (through straightening)
 #default is 20
-max_reprojection_error: 20 #float
+max_reprojection_error: 10 #float
 
 #################
 #Post Processing#
