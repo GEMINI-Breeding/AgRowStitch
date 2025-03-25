@@ -474,9 +474,14 @@ def spherical_camera_estimation(features, matches, config):
     success, cameras = estimator.apply(features, matches, None)
     if not success:
         raise ValueError("Failed to estimate cameras")
-    #Change types to match what bundleAdjuster wants
+        
+    #Change types to match what bundleAdjuster wants and try to check for bad camera estimates
     for cam in cameras:
-        cam.R = cam.R.astype(np.float32)  
+        camera_vector_magnitude = np.linalg.norm(np.matmul(cam.R.T, np.array([0, 0, 1])))
+        if (cam.R[2,2] == 0 or cam.focal < 0) or (camera_vector_magnitude > 1.5):
+            raise ValueError("Invalid camera estimate")
+        cam.R = cam.R.astype(np.float32)
+        
     adjuster = cv2.detail_BundleAdjusterRay()
     #Having a low threshold helps force the cameras to keep the matches we want,
     #we assume that this is preferable to OpenCV trying to reject some of our image matches
@@ -924,7 +929,8 @@ def retry_panorama(start_idx, filtered, config):
                 if not check_panorama(new_panorama, config):
                     print("Spherical stitching was unreliable, re-trying with partial affine...")
                     new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
-            except:
+            except ValueError as e:
+                print(e)
                 print("Spherical stitching failed, re-trying with partial affine...")
                 new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
         else:
@@ -951,7 +957,8 @@ def retry_panorama(start_idx, filtered, config):
                 if not check_panorama(new_panorama, config):
                     print("Spherical stitching was unreliable, re-trying with partial affine...")
                     new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
-            except:
+            except ValueError as e:
+                print(e)
                 print("Spherical stitching failed, re-trying with partial affine...")
                 new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
         else:
@@ -999,7 +1006,8 @@ def run_stitching_pipeline(start_idx, config):
                 config["camera"] = "partial affine"
                 panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
                 config["camera"] = "spherical"
-        except: #If bundle adjustment fails, fall back on a partial affine stitch with same keypoints instead
+        except ValueError as e: #If bundle adjustment fails, fall back on a partial affine stitch with same keypoints instead
+            print(e)
             print("Spherical stitching failed, re-trying with partial affine...")
             config["camera"] = "partial affine"
             panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
