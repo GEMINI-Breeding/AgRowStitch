@@ -486,7 +486,7 @@ def spherical_camera_estimation(features, matches, config):
     #Having a low threshold helps force the cameras to keep the matches we want,
     #we assume that this is preferable to OpenCV trying to reject some of our image matches
     adjuster.setConfThresh(0.1)
-    success, cameras =adjuster.apply(features, matches, cameras)
+    success, cameras = adjuster.apply(features, matches, cameras)
     if not success:
         raise ValueError("Failed to adjust cameras")
     #To help maintain straighter panoramas, use wave correction to help account for
@@ -923,7 +923,7 @@ def retry_panorama(start_idx, filtered, config):
         images, cv_features, matches, keypoint_dict, idx, filtered, finished, subset_image_names = prepare_OpenCV_objects(start_idx, config)
         
         #If a spherical stitch is not possible, try with a partial affine stitch instead
-        if config["camera"] == "spherical":
+        if config["camera"] == "spherical" and ((idx - start_idx) > (config["batch_size"] - 1) and not finished):
             try:
                 new_panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
                 if not check_panorama(new_panorama, config):
@@ -951,7 +951,7 @@ def retry_panorama(start_idx, filtered, config):
         config["max_RANSAC_thresh"] *= 1.2
         images, cv_features, matches, keypoint_dict, idx, filtered, finished, subset_image_names = prepare_OpenCV_objects(start_idx, config)
         #If a spherical stitch is not possible, try with a partial affine stitch instead
-        if config["camera"] == "spherical":
+        if config["camera"] == "spherical" and ((idx - start_idx) > (config["batch_size"] - 1) and not finished):
             try:
                 new_panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
                 if not check_panorama(new_panorama, config):
@@ -997,7 +997,8 @@ def run_stitching_pipeline(start_idx, config):
     #########################################################################################
     #Spherical projection works best because of robust bundle adjustment and wave correction#
     #########################################################################################
-    if config["camera"] == "spherical":
+    #Default to affine if there were no good matches
+    if config["camera"] == "spherical" and ((idx - start_idx) > (config["batch_size"] - 1) and not finished):
         try: #Since bundle adjustment can fail, we use a try/except statement
             panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
             #If the panorama seems incorrect, use the same keypoints and try with a partial affine projection
