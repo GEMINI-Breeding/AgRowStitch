@@ -105,7 +105,7 @@ def get_inliers(img_feats, img_paths, src_idx, dst_idx, img_dim, config):
         #Need at least four points to find a transform
         if len(filtered_idx[0]) > 3:
             keypoint_prop_dict[keypoint_prop] = filtered_idx
-            
+
     ####################################################
     #Filter based on keypoint distances from each other#
     ####################################################
@@ -489,16 +489,21 @@ def spherical_camera_estimation(features, matches, config):
     success, cameras = adjuster.apply(features, matches, cameras)
     if not success:
         raise ValueError("Failed to adjust cameras")
+        
     #To help maintain straighter panoramas, use wave correction to help account for
     #the camera angle changing and not being normal to the ground
     wave_direction = cv2.detail.WAVE_CORRECT_HORIZ
     rotation_matrices = [np.copy(cam.R) for cam in cameras]
     rotation_matrices = cv2.detail.waveCorrect(rotation_matrices, wave_direction)
     for i, cam in enumerate(cameras):
-        cam.R = rotation_matrices[i]
+        diagonals = np.array([cam.R[0,0], cam.R[1,1], cam.R[2,2]])
+        if np.any(diagonals < 0.85):
+            raise ValueError("Invalid camera estimate")
+        else:
+            cam.R = rotation_matrices[i]
     return cameras
 
-def spherical_warper(original_img, camera, scale, aspect_ratio):
+def spherical_warper(original_img, camera, scale, aspect_ratio, config):
     ##########################################################################
     #Project images onto a sphere assuming a stationary camera with rotations#
     #and variable focal length                                               #
@@ -511,6 +516,8 @@ def spherical_warper(original_img, camera, scale, aspect_ratio):
     K[1, 1] *= aspect_ratio
     K[1, 2] *= aspect_ratio
     roi  = warper.warpRoi((w, h), K = K, R = camera.R) #returns (top_leftx, top_lefty, sizex, sizey)
+    if roi[2] > 3* config["img_dims"][0] or roi[3] > 3* config["img_dims"][1]:
+        raise ValueError("Invalid scale in warp")
     top_left, warped = warper.warp(original_img, K = K, R = camera.R,
                       interp_mode = cv2.INTER_LINEAR, border_mode = cv2.BORDER_REFLECT)
     #Create a black and white mask of the warped image for cropping, finding seams, and blending
@@ -533,7 +540,7 @@ def spherical_warp_images(images, cameras, config):
     final_sizes = []
     camera_aspect = 1.0
     for img, camera in zip(images, cameras):
-        warped_img, warped_mask, corner, size = spherical_warper(img, camera, scale, camera_aspect)
+        warped_img, warped_mask, corner, size = spherical_warper(img, camera, scale, camera_aspect, config)
         warped_final_imgs.append(warped_img)
         warped_final_masks.append(warped_mask)
         final_corners.append(corner)
@@ -546,7 +553,7 @@ def spherical_warp_images(images, cameras, config):
     low_imgs = [cv2.resize(img, dsize = None, fx = config["seam_resolution"], fy = config["seam_resolution"]) for img in images]
     downscale_aspect_ratio = config["seam_resolution"]
     for img, camera in zip(low_imgs, cameras):
-        warped_img, warped_mask, corner, size = spherical_warper(img, camera, scale, downscale_aspect_ratio)
+        warped_img, warped_mask, corner, size = spherical_warper(img, camera, scale, downscale_aspect_ratio, config)
         warped_low_imgs.append(warped_img)
         warped_low_masks.append(warped_mask)
         low_corners.append(corner)
