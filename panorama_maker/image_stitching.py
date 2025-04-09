@@ -477,8 +477,8 @@ def spherical_camera_estimation(features, matches, config):
         
     #Change types to match what bundleAdjuster wants and try to check for bad camera estimates
     for cam in cameras:
-        camera_vector_magnitude = np.linalg.norm(np.matmul(cam.R.T, np.array([0, 0, 1])))
-        if (cam.R[2,2] == 0 or cam.focal < 0) or (camera_vector_magnitude > 1.5):
+        camera_vector_magnitude = np.linalg.norm(np.matmul(cam.R, np.array([0, 0, 1])))
+        if (cam.R[2,2] < 0.1 or cam.focal < 0) or (camera_vector_magnitude > 2.5):
             raise ValueError("Invalid camera estimate")
         cam.R = cam.R.astype(np.float32)
         
@@ -496,9 +496,12 @@ def spherical_camera_estimation(features, matches, config):
     rotation_matrices = [np.copy(cam.R) for cam in cameras]
     rotation_matrices = cv2.detail.waveCorrect(rotation_matrices, wave_direction)
     for i, cam in enumerate(cameras):
-        diagonals = np.array([cam.R[0,0], cam.R[1,1], cam.R[2,2]])
-        if np.any(diagonals < 0.85):
-            raise ValueError("Invalid camera estimate")
+        #The camera axis is the z, so we want the local z to global z to have movement in the 
+        #y direction and primarily movement in the x direction, but if it gets too oblique,
+        #it will probably be weird. The z-coordinate should also never be negative.
+        camera_vector = np.abs(np.matmul(cam.R, np.array([0, 0, 1])))
+        if (abs(camera_vector[1]) > 0.5) or (camera_vector[2] < 0.1) :
+            raise ValueError("Invalid camera adjustment")
         else:
             cam.R = rotation_matrices[i]
     return cameras
@@ -908,7 +911,7 @@ def check_panorama(panorama, config):
         if dim_ratio > 1.5:
             print("Aspect ratio of panorama is concerning")
         #1:1.5 ratio threshold for top and bottom length to check for spherical distortion
-        if rhombus < 0.85:
+        if rhombus < 0.67:
             print("Panorama seems distorted")
         return False
 
@@ -930,7 +933,7 @@ def retry_panorama(start_idx, filtered, config):
         images, cv_features, matches, keypoint_dict, idx, filtered, finished, subset_image_names = prepare_OpenCV_objects(start_idx, config)
         
         #If a spherical stitch is not possible, try with a partial affine stitch instead
-        if config["camera"] == "spherical" and ((idx - start_idx) > (config["batch_size"] - 1) and not finished):
+        if config["camera"] == "spherical" and ((idx - start_idx) > (config["batch_size"] - 2) and not finished):
             try:
                 new_panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
                 if not check_panorama(new_panorama, config):
@@ -958,7 +961,7 @@ def retry_panorama(start_idx, filtered, config):
         config["max_RANSAC_thresh"] *= 1.2
         images, cv_features, matches, keypoint_dict, idx, filtered, finished, subset_image_names = prepare_OpenCV_objects(start_idx, config)
         #If a spherical stitch is not possible, try with a partial affine stitch instead
-        if config["camera"] == "spherical" and ((idx - start_idx) > (config["batch_size"] - 1) and not finished):
+        if config["camera"] == "spherical" and ((idx - start_idx) > (config["batch_size"] - 2) and not finished):
             try:
                 new_panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
                 if not check_panorama(new_panorama, config):
@@ -1005,7 +1008,7 @@ def run_stitching_pipeline(start_idx, config):
     #Spherical projection works best because of robust bundle adjustment and wave correction#
     #########################################################################################
     #Default to affine if there were no good matches
-    if config["camera"] == "spherical" and ((idx - start_idx) > (config["batch_size"] - 1) and not finished):
+    if config["camera"] == "spherical" and ((idx - start_idx) > (config["batch_size"] - 2) and not finished):
         try: #Since bundle adjustment can fail, we use a try/except statement
             panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
             #If the panorama seems incorrect, use the same keypoints and try with a partial affine projection
@@ -1903,7 +1906,7 @@ def save_final_panorama(super_panorama, config):
         GPS_data["x"] *= scalex
         GPS_data["y"] *= scaley
         GPS_data["x"] += padx
-        GPS_data["y"] *= pady
+        GPS_data["y"] += pady
         if config["GPS"]:
             GPS_data.to_csv(os.path.join(config["final_panorama_path"], "resized_" + register_name))
     if config["save_low_resolution"]:
