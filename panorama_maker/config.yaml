@@ -1,76 +1,50 @@
-##########################
-#Path to images to stitch#
-##########################
-#Stitches all files in image_directory assuming they are already in stitching order
-#Intermediate files are saved in parent directory with suffix _output
-#Final panoramas are saved in parent directory in final_panoramas
-#To run on all subdirectories, specify parent_directory INSTEAD of image_directory
-#image_directory: "D:\\Analysis\\Chlorophyll_Frames\\07_16_2024_B4_frames_10fps"
-parent_directory: D:\\Analysis\\Chlorophyll_Frames\\
-#Save intermedite batch panoramas, necessary if using batch_only mode later
-save_output: True #True or False if False, delete intermediate files after finishing
-
 ################
-#Image settings#
+#Basic Settings#
 ################
-#Device used for keypoint extraction and matching
+image_directory: "D:\\Tests\\Kaziga\\08_01_2024_B4_frames_10fps"
+#parent_directory: D:\\Tests\\Kaziga\\
 device: "cuda"  #Use "cuda" for GPU, "mps" for Mac, or "cpu"
-#Batch size over 50 will lead to long bundle adjustment, 10-20 is recommended
-#Smaller batch sizes are best if there is a bias is camera scale or orientation
-batch_size: 10 #integer
-#Reduce resolution of original images by this factor for feature extraction and final panorama
 final_resolution: 1.0 #1.0 for native resolution, float
-#Reduce resolution of final resolution by this amount to find seams
 seam_resolution: 0.15 #Lower values accelerate stitching process
-#The edge of the image that is stitched with the next image, will modify images so that stitching edge is LEFT
 stitching_direction: "LEFT" #("LEFT", "RIGHT", "UP", "DOWN")
 mask: [0, 0, 0, 0] #Pixels to remove from original image edges [left edge, right edge, top edge, bottom edge]
-#Kaziga: [0, 0, 0, 0]; Amiga: [0, 0, 420, 0]; T4: [640, 640, 0, 0]; Dormant grapes: [0, 40, 500, 0]; Daytime grapes[0, 0, 300, 0]
-#Camera model used to make intermediate panoramas, spherical is recommended unless camera orientation is stable
-camera: "spherical" #("spherical", "partial_affine")
+#Monopod: [0, 0, 0, 0]; Amiga: [0, 0, 420, 0]; T4: [640, 640, 0, 0]
+forward_limit: 10 #integer, 3 for T4 and Kaziga, 3 for Amiga?
+max_reprojection_error: 3 # float, 1-10 is recommended, for Kaziga, T4, 12 for Amiga?
+
+###############
+#Save Settings#
+###############
+save_full_resolution: False #True or False
+save_resized_resolution: True #True or False
+final_size: [71628, 0] #[width, height] pixel dimensions where width is the dimension of camera movement, use zero if one dimension is free to maintain aspect ratio and the other is fixed, integers
+crop_size: 0 #integer, if the free dimension in final size should be cropped or padded to a specific pixel dimension, 0 for nothing
+save_low_resolution: True #True or False
+low_resolution: 0.1 #downscaling factor, float
+save_output: True #True or False if False, delete intermediate files after finishing
+
+###################
+#Advanced Settings#
+###################
+verbose: False #True or False, print detailed information during the stitching process
+batch_size: 10 #integer, 10-20 is recommended, large batch sizes increase total run time
+keypoint_prop: 0.5 #Should by multiple of 0.1, float in range 0.1 to 1.0 
+xy_ratio: 0.75 #float, #minimum direction of travel/normal direction of travel in homography
+scale_constraint: 0.3 #float, #maximum value that abs(scale-1) can take in homography
+min_inliers: 20 #integer, 20-50 is recommended
+max_RANSAC_thresh: 8 #float, 1-10 is recommended, should be higher than max_reprojection_error, roughly twice as high
+camera: "spherical" #("spherical", "partial_affine") spherical is recommended unless camera orientation is stable
+final_straighten: True #True or False
+points_per_image: 10 #int, density of points when creating splines for straightening, 5-10 should be sufficient
+straightening_threshold: 0.01 #float, threshold in slope change that triggers straightening
+
+##############
+#GPS settings#
+##############
 #If there is GPS information linked to each image, there should be a "gps.csv" file in the image_directory
 #with columns "image", "latitude", and "longitude". An output file will be written in the final output path
 #with columns "image", "latitude", "longitude", "x", and "y", where (0,0) is the top left corner and x is the horizontal
 GPS: False #True or False
-
-#################
-#Filter settings#
-#################
-#Starting range to filter how close the keypoints need to be to stitching edge, 1.0 to turn off, default 0.5
-keypoint_prop: 0.5 #Should by multiple of 0.1, float in range 0.1 to 1.0
-#Number of images ahead that can be stitched, should adjust based on image overlap
-forward_limit: 5 #integer, 4 for standards?
-#Minimum direction of travel/normal direction of travel in homography
-xy_ratio: 1.2 #float
-#Maximum value that abs(scale-1) can take in homography
-scale_constraint: 0.25 #float 
-#Minimum number of inlier matches necessary to consider it a match, 20-50, should increase with max_reprojection_error
-min_inliers: 20 #integer
-#Maximum threshold for RANSAC to try to get min_inliers, 1-10, should increase with image noise and resolution
-max_RANSAC_thresh: 10 #float
-#Number of pixels of reprojection error that the homography inliers can have to be considered a good match, 10-100, but should scale with resolution
-#Lower reprojection error and RANSAC threshold will use more images and create shorter intermediate panoramas, so there is a tradeoff between
-#ghosting in intermediate panoramas (longer panoramas that skip more images) and more seams from connecting intermediate panoramas (through straightening)
-#default is 20, 15 for standards?
-max_reprojection_error: 25 #float
-
-#################
-#Post Processing#
-#################
-#Straighten final panorama before saving, may be time intensive for high resolution
-final_straighten: True #True or False
 #Change the orientation of final panorama before saving, if False camera movement will be right to left (stitching edge left)
 #"COMPASS" for NSEW orientation on screen if GPS is True, which will assume beds are aligned with one cardinal direction
 change_orientation: False #False, "90CW", "90CCW", "180" for clockwise, counterclockwise, or reverse direction --  or "COMPASS" for North is up
-#Save final panorama at the final_resolution used for stitching
-save_final_resolution: False #True or False
-#Save a version of the final panorama scaled to a specific resolution
-save_resized_resolution: True #True or False
-#Resize final panorama to fit specific dimensions or scale to fit one dimension
-final_size: [71628, 0] #[width, height] pixel dimensions where width is the dimension of camera movement, use zero if one dimension is free to maintain aspect ratio and the other is fixed, integers
-#If the free dimension in final size should be cropped or padded to a specific pixel dimension, 0 for nothing
-crop_size: [0, 0] #integers
-#In addition to saving the final panorama generated at final_resolution, save a smaller copy for viewing
-#Save an additional low resolution image downscaled by the low_resolution factor, if image is resized, it will downscale on the resized image
-save_low_resolution: True #True or False
-low_resolution: 0.1 #downscaling factor, float
