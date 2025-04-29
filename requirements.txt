@@ -1,8 +1,9 @@
-opencv-python
-torch
-numpy
-PyYAML
-torchvision
 ipykernel
-matplotlib
+numpy
+opencv-python
+pandas
+PyYAML
 scipy
+torch
+torchvision
+

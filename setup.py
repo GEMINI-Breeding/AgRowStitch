@@ -1,22 +1,22 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='panorama_maker',
+    name='AgRowStitch',
     version='0.1.0',
-    description='A tool for stitching together images from agricultural scenes using LightGlue and other tools',
+    description='A tool for stitching together images from agricultural scenes using LightGlue and OpenCV',
     author='GEMINI Breeding',
     author_email='ikuyehara@ucdavis.edu',
     url='https://github.com/GEMINI-Breeding/Panorama-Maker.git',  # Replace with your repo
     packages=find_packages(),
     install_requires=[
-        'opencv-python',
-        'torch',
-        'numpy',
-        'PyYAML',
-        'torchvision',
         'ipykernel',
-        'matplotlib',
-        # the stitching package allows for higher-level access to the opencv pipeline, but is not necessary
+        'numpy',
+        'opencv-python',
+        'pandas',
+        'PyYAML',
+        'scipy',
+        'torch',
+        'torchvision'
     ],
     dependency_links=[
         'https://github.com/cvg/LightGlue.git#egg=LightGlue'
