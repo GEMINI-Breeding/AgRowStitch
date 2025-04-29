@@ -2341,7 +2341,6 @@ def adjust_config(config, image_directory, parent_directory):
     #Check that write path exists#
     ##############################
     if not os.path.exists(config["final_mosaic_path"]):
-        config["logger"].info("Creating {}".format(config["final_mosaic_path"]))
         os.makedirs(config["final_mosaic_path"])
 
     ######################################################################
