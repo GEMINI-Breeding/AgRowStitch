@@ -7,6 +7,7 @@ Created on Thu Dec 19 16:33:41 2024
 import cv2
 from lightglue import LightGlue, SuperPoint #git clone https://github.com/cvg/LightGlue.git && cd LightGlue
 from lightglue.utils import rbd
+import logging
 import itertools
 import numpy as np
 import os
@@ -18,7 +19,6 @@ import sys
 import time
 import torch
 from torchvision import transforms
-import warnings
 import yaml
 
 def read_image(img_path, config):
@@ -31,11 +31,18 @@ def read_image(img_path, config):
     x_start, right, y_start, bottom = config["mask"]
     x_end = int(xdim - right)
     y_end = int(ydim - bottom)
-    #Crop out borders if there is a mask in the config
+    
+    ###################################################
+    #Crop out borders if there is a mask in the config#
+    ###################################################
     image = image[int(y_start):y_end, int(x_start):x_end]
     image = cv2.resize(image, dsize = None,
                        fx = config["final_resolution"],
                        fy = config["final_resolution"])
+    
+    #############################################################################
+    #Rotate image based on stitching direction so that stitching edge is on left#
+    #############################################################################
     if config["stitching_direction"] == 'RIGHT':
         #Flip image across vertical axis so the stitching edge is now on the left
         image = cv2.flip(image, 1)
@@ -49,7 +56,7 @@ def read_image(img_path, config):
 
 def extract_features(img_path, config):
     ##################################
-    #Load image and reduce resolution#
+    #Load image and change resolution#
     ##################################
     image = read_image(img_path, config)
 
@@ -71,8 +78,7 @@ def get_inliers(img_feats, img_paths, src_idx, dst_idx, config):
     ###########################################################
     #Use LightGlue to match features extracted from SuperPoint#
     ###########################################################
-    if config["verbose"]:
-        print("Finding matches between image ", src_idx, " and image ", dst_idx)
+    config["logger"].debug("Finding matches between image {}  and image {}".format(src_idx, dst_idx))
     #Only extract features if not already present to minimize VRAM use
     if src_idx not in img_feats:
         img_feats[src_idx] = extract_features(img_paths[src_idx], config)
@@ -91,6 +97,7 @@ def get_inliers(img_feats, img_paths, src_idx, dst_idx, config):
     m_kpts0_np = m_kpts0.cpu().numpy()
     m_kpts1_np = m_kpts1.cpu().numpy()
     img_dim = config["img_dims"][0]
+    
     ##############################################
     #Subset the matching points based on position#
     ##############################################
@@ -109,6 +116,9 @@ def get_inliers(img_feats, img_paths, src_idx, dst_idx, config):
         if len(filtered_idx[0]) > 3:
             keypoint_prop_dict[keypoint_prop] = filtered_idx
             
+    ###########################
+    #Clean keypoint dictionary#
+    ###########################
     #No need to retry with different keypoint_prop if it doesn't increase the number of inliers
     #so remove keys where we do not gain inliers from previous keypoint prop
     last_value = len(list(keypoint_prop_dict.items())[0][1][0])
@@ -127,14 +137,14 @@ def get_inliers(img_feats, img_paths, src_idx, dst_idx, config):
         #unlikely to be present in more than two images.
         m_kpts0_f = m_kpts0_np[filtered_idx]
         m_kpts1_f = m_kpts1_np[filtered_idx]
-
+        
         if len(m_kpts0_f) >= config["min_inliers"]:
             #Changing the RANSAC threshold parameter will determine if we get more but noisier matches (higher value)
             #or fewer but more pixel-perfect matches (lower value). Lower values help ensure that the OpenCV Matcher
             #will also match the points.
             transformation_matrix = None
-            if config["verbose"]:
-                print("Found ", len(m_kpts0_f), " inliers with keypoint filter of ", keypoint_prop)
+            config["logger"].debug("Found {} inliers with keypoint filter of {}".format(len(m_kpts0_f), keypoint_prop))
+                
             ######################################################
             #Filter based on RANSAC threshold and minimum inliers#
             ###################################################### 
@@ -142,8 +152,7 @@ def get_inliers(img_feats, img_paths, src_idx, dst_idx, config):
             for RANSAC_threshold in range(1, int(config["max_RANSAC_thresh"]) + 1):
                 H, mask = cv2.findHomography(m_kpts0_f, m_kpts1_f, cv2.RANSAC, RANSAC_threshold)
                 if np.sum(mask) >= config["min_inliers"]:
-                    if config["verbose"]:
-                        print("Using RANSAC threshold of ", RANSAC_threshold, " to get ", np.sum(mask), " inliers")
+                    config["logger"].debug("Using RANSAC threshold of {} to get {} inliers".format(RANSAC_threshold, np.sum(mask)))
                     transformation_matrix = H
                     break
                 
@@ -165,9 +174,8 @@ def get_inliers(img_feats, img_paths, src_idx, dst_idx, config):
                     preselect_kp0, preselect_feat0 = kpts0[k0_idx].cpu().numpy(), feats0['descriptors'][k0_idx].cpu().numpy()
                     preselect_kp1, preselect_feat1 = kpts1[k1_idx].cpu().numpy(), feats1['descriptors'][k1_idx].cpu().numpy()
                     mean_error, _ = get_LMEDS_error(preselect_kp0, preselect_kp1, config)
-                    if config["verbose"]:
-                        print("Initial reprojection error of: ", mean_error)
-                    
+                    config["logger"].debug("Initial reprojection error of: {}".format(mean_error))
+
                     ####################################################################################################
                     #Filter out what we believe to be the most non-planar points so that we can optimize the homography#
                     ####################################################################################################
@@ -197,33 +205,27 @@ def get_inliers(img_feats, img_paths, src_idx, dst_idx, config):
                     #Filter based on reprojection error#
                     ####################################
                     if mean_error <= config["max_reprojection_error"]:
-                        if config["verbose"]:
-                            print(len(preselect_kp0), " inliers after filtering, for a final reprojection error of: ", mean_error)
+                        config["logger"].debug("{} inliers after filtering, for a final reprojection error of: {}".format(len(preselect_kp0), mean_error))
                         return (img_feats, True, preselect_kp0, preselect_feat0, preselect_kp1, preselect_feat1, mean_error, RANSAC_threshold, keypoint_prop)
                     else:
-                        if config["verbose"]:
-                            print("Minimum error of ", mean_error, " was above error threshold, consider adjusting max_reprojection_error")
+                        config["logger"].debug("Minimum error of {} was above error threshold, consider adjusting max_reprojection_error".format(mean_error))
                 else:
-                    if config["verbose"]:
-                        if stitch_movement <= 0:
-                            print("Rejecting match because camera not moving forward")
-                        if forward_vs_lateral < config["xy_ratio"]:
-                            print("Low movement ratio of ", forward_vs_lateral, " in the non-stitching direction, consider adjusting xy_ratio")
-                        if abs(scale - 1.0) > config["scale_constraint"]:
-                            print("Scale difference between images is too high at ", abs(scale - 1.0)," consider adjusting scale_constraint")
+                    if stitch_movement <= 0:
+                        config["logger"].debug("Rejecting match because camera not moving forward")
+                    if forward_vs_lateral < config["xy_ratio"]:
+                        config["logger"].debug("Low movement ratio of {} in the non-stitching direction, consider adjusting xy_ratio".format(forward_vs_lateral))
+                    if abs(scale - 1.0) > config["scale_constraint"]:
+                        config["logger"].debug("Scale difference between images is too high at {} consider adjusting scale_constraint".format(abs(scale - 1.0)))
             else:
-                if config["verbose"]:
-                    print("Could not find sufficient RANSAC inliers, consider increasing max_RANSAC_thresh")
+                config["logger"].debug("Could not find sufficient RANSAC inliers, consider increasing max_RANSAC_thresh")
         else:
-            if config["verbose"]:
-                print("Only found ", len(m_kpts0_f), " inliers with keypoint filter of ", keypoint_prop, " consider increasing min_inliers")
-                        
+            config["logger"].debug("Only found {} inliers with keypoint filter of {} consider increasing min_inliers".format(len(m_kpts0_f), keypoint_prop))
+
     ########################################################################
     #Force to match with image if this is there are no more images to check#
     ########################################################################
     if dst_idx - src_idx == 1:
-        if config["verbose"]:
-            print("Cannot find good matches, so forced to match image ", src_idx, " and ", dst_idx)
+        config["logger"].warning("Cannot find good matches, so forced to match image {} and {}".format(src_idx, dst_idx))
         #If the filters exclude the match, pass the original match points in the most generous
         #RANSAC inliers and features as a last resort
         H, default_mask = cv2.findHomography(m_kpts0_np, m_kpts1_np, cv2.RANSAC, config["max_RANSAC_thresh"])
@@ -306,8 +308,7 @@ def check_forward_matches(img_matches, img_feats, img_paths, src_idx, config):
             #Save keypoints and features for use in OpenCV#
             ###############################################
             if matched:
-                if config["verbose"]:
-                    print("Succesfully matched image ", src_idx, " and ", dst_idx)
+                config["logger"].debug("Succesfully matched image {} and {}".format(src_idx, dst_idx))
                 img_matches[src_idx]['keypoints']['src'] = [keypoint for keypoint in kps.tolist()]
                 img_matches[src_idx]['features']['src'] = [feature for feature in fs.tolist()]
                 img_matches[dst_idx]['keypoints']['dst'] = [keypoint for keypoint in kpd.tolist()]
@@ -327,6 +328,7 @@ def find_matching_images(img_paths, start_idx, config):
         img_matches[i] = {'keypoints': {'src': [], 'dst': []}, 'features': {'src': [], 'dst': []}}
     src_idx, dst_idx = start_idx, start_idx
     image_subset = [start_idx]
+    
     #A dictionary to hold pointers to feature tensors extracted on GPU (or RAM), we avoid extracting the features from all images
     #because we ideally use as few images as possible
     img_feats = {}
@@ -345,7 +347,7 @@ def build_feature_objects(subset_image_paths, img_matches, subset_indices, confi
     #Convert the preselected SuperPoint keypoint and features into OpenCV objects#
     ##############################################################################
     cv_features = []
-    dummy_img = read_image(subset_image_paths[0], config) #load first image to get dimensions
+    dummy_img = read_image(subset_image_paths[0], config) #load first image as a dummy
 
     #We pass dummy images since we are manually setting the info
     for idx in subset_indices:
@@ -429,7 +431,7 @@ def prepare_OpenCV_objects(start_idx, config):
     image_paths = [os.path.join(path, img_name) for img_name in os.listdir(path) if img_name.endswith(image_types)]
     image_paths = sorted_nicely(image_paths)
     if start_idx == 0:
-        print('Found ', len(image_paths), ' images')
+        config["logger"].info("Found {} images".format(len(image_paths)))
         
     ###############################################################################
     #Get the features for the best subset of images using SuperPoint and LightGlue#
@@ -641,24 +643,18 @@ def estimate_cameras(keypoint_dict, config):
     for src, dst in [(i, i+1) for i in range(num_images - 1)]:
         kp0 = np.array(keypoint_dict[src]['src'], dtype = np.int64)
         kp1 = np.array(keypoint_dict[dst]['dst'], dtype = np.int64)
-        if config["camera"] == "homography":
-            #Full homography is less stable than affine and partial affine
-            #because perspective changes on non-planar objects
-            #will distort objects based on depth and may lead to 
-            #cliping images during warping. Poor homography matches
-            #can lead to memory issues and failure.
-            H_LMEDS, _LMEDS = cv2.findHomography(kp0, kp1, cv2.LMEDS)
-        elif config["camera"] == "affine":
-            #Affine transformations are more stable than homography, but 
-            #the shearing can also distort the final panorama.
-            H_LMEDS, _LMEDS = cv2.estimateAffine2D(kp0, kp1, cv2.LMEDS)
-            H_LMEDS = np.vstack((H_LMEDS, np.array([0, 0, 1])))
-        else: 
-            #Partial affine transformations are the most stable and are recommended
-            #unless the objects are planar (homography) or high shearing (affine).
-            H_LMEDS, _LMEDS = cv2.estimateAffinePartial2D(kp0, kp1, cv2.LMEDS)
-            H_LMEDS = np.vstack((H_LMEDS, np.array([0, 0, 1])))
+        
+        ###############################
+        #Get partial affine homography#
+        ###############################
+        #Partial affine transformations are the most stable and are recommended
+        H_LMEDS, _LMEDS = cv2.estimateAffinePartial2D(kp0, kp1, cv2.LMEDS)
+        H_LMEDS = np.vstack((H_LMEDS, np.array([0, 0, 1])))
         H_pairs.append(H_LMEDS)
+    
+    #########################
+    #Build global homography#
+    #########################
     #Now choose the middle image as a reference image and convert the transformation
     #matrices to be with resepct to the reference to create global coordinates.
     H_list = []
@@ -680,8 +676,11 @@ def estimate_cameras(keypoint_dict, config):
             #Keep H as is since dst ->src gets us towards middle image
                 H_to_middle = np.matmul(H_to_middle, H_pairs[m])
             H_list.append(H_to_middle)
-    #Save the matrix as a camera parameter to make it more accessible
-    #to OpenCV functions in the future
+            
+    ##################################################
+    #Save the homography matrices as camera rotations#
+    ##################################################
+    #This allows us to use OpenCV functions in the future
     cameras = []
     for c in range(num_images):
         cam = cv2.detail.CameraParams()
@@ -713,6 +712,10 @@ def estimate_translation_cameras(keypoint_dict, config):
                             [0, 1, transy]])
         H_LMEDS = np.vstack((reduced, np.array([0, 0, 1])))
         H_pairs.append(H_LMEDS)
+        
+    #########################
+    #Build global homography#
+    #########################
     #Now choose the middle image as a reference image and convert the transformation
     #matrices to be with resepct to the reference to create global coordinates.
     H_list = []
@@ -734,8 +737,11 @@ def estimate_translation_cameras(keypoint_dict, config):
             #Keep H as is since dst ->src gets us towards middle image
                 H_to_middle = np.matmul(H_to_middle, H_pairs[m])
             H_list.append(H_to_middle)
-    #Save the matrix as a camera parameter to make it more accessible
-    #to OpenCV functions in the future
+            
+    ##################################################
+    #Save the homography matrices as camera rotations#
+    ##################################################
+    #This allows us to use OpenCV functions in the future
     cameras = []
     for c in range(num_images):
         cam = cv2.detail.CameraParams()
@@ -879,6 +885,9 @@ def threshold_image(image, threshold_value, pad):
     #keep only the largest connected component         #
     ####################################################
     imgray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    #We need to specify a threshold value because blending can cause
+    #some non-black pixels that should be treated as black
     ret, thresh = cv2.threshold(imgray, threshold_value, 255, 0) #separate black from non-black pixels
     thresh = cv2.copyMakeBorder(thresh, pad, pad, pad, pad, cv2.BORDER_CONSTANT) #add padding for corner finding
     output = cv2.connectedComponentsWithStats(thresh, 8, cv2.CV_32S)
@@ -929,7 +938,6 @@ def check_panorama(panorama, config):
     else:
         side_rhombus = right_height/left_height
     rhombus = min(top_rhombus, side_rhombus)
-
         
     ############################
     #Check if panorama has gaps#
@@ -946,12 +954,12 @@ def check_panorama(panorama, config):
         return True
     else:
         if len(contours) > 1.0:
-            print("Panorama is not continuous!")
+            config["logger"].debug("Panorama is not continuous!")
         if dim_ratio > 1.5:
-            print("Dimensions of panorama are concerning")
+            config["logger"].debug("Dimensions of panorama are concerning")
         #1:1.5 ratio threshold for lengths to check for distortion
         if rhombus < 0.67:
-            print("Panorama seems distorted")
+            config["logger"].debug("Panorama seems distorted")
         return False
 
 def retry_panorama(start_idx, filtered, config):
@@ -965,7 +973,7 @@ def retry_panorama(start_idx, filtered, config):
         #imposed on the homography could not be met, so we try to relax #
         #those constraints to maintain some filter on the points        #
         #################################################################
-        print("Retrying with relaxed error and inlier constraints...")
+        config["logger"].debug("Retrying with relaxed error and inlier constraints...")
         config["max_reprojection_error"] *= 1.2
         config["min_inliers"] *= 0.8
         config["max_RANSAC_thresh"] *= 1.2
@@ -978,11 +986,11 @@ def retry_panorama(start_idx, filtered, config):
             try:
                 new_panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
                 if not check_panorama(new_panorama, config):
-                    print("Spherical stitching was unreliable, retrying with partial affine... consider reducing forward_limit or batch_size")
+                    config["logger"].warning("Spherical stitching was unreliable, retrying with partial affine... consider reducing forward_limit or batch_size")
                     new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
             except ValueError as e:
-                print(e)
-                print("Spherical stitching failed, retrying with partial affine... consider reducing forward_limit or batch_size")
+                config["logger"].warning(e)
+                config["logger"].warning("Spherical stitching failed, retrying with partial affine... consider reducing forward_limit or batch_size")
                 new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
         else:
             new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
@@ -999,7 +1007,7 @@ def retry_panorama(start_idx, filtered, config):
         #so we tighten the constraints to try to remove outliers that could cause#
         #a stitching failure                                                     #
         ##########################################################################
-        print("Panorama is unreliable, retrying with stronger error and inlier constraints...")
+        config["logger"].warning("Panorama is unreliable, retrying with stronger error and inlier constraints...")
         config["max_reprojection_error"] *= 0.8
         config["min_inliers"] *= 1.2
         config["max_RANSAC_thresh"] *= 0.8
@@ -1011,11 +1019,11 @@ def retry_panorama(start_idx, filtered, config):
             try:
                 new_panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
                 if not check_panorama(new_panorama, config):
-                    print("Spherical stitching was unreliable, retrying with partial affine... consider reducing forward_limit or batch_size")
+                    config["logger"].warning("Spherical stitching was unreliable, retrying with partial affine... consider reducing forward_limit or batch_size")
                     new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
             except ValueError as e:
-                print(e)
-                print("Spherical stitching failed, retrying with partial affine... consider reducing forward_limit or batch_size")
+                config["logger"].warning(e)
+                config["logger"].warning("Spherical stitching failed, retrying with partial affine... consider reducing forward_limit or batch_size")
                 new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
         else:
             new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
@@ -1041,7 +1049,7 @@ def retry_panorama(start_idx, filtered, config):
     if check_panorama(new_panorama, config):
         return new_panorama, idx, finished, len(images)
     else:
-        warnings.warn("Trying to proceed with a distorted panorama...")
+        config["logger"].warning("Trying to proceed with a distorted panorama...")
         return new_panorama, idx, finished, len(images)
 
 def run_stitching_pipeline(start_idx, config):
@@ -1050,6 +1058,7 @@ def run_stitching_pipeline(start_idx, config):
     #when the number of stitched images reaches the batch size                    #
     ###############################################################################
     #Extract the features and matches between the minimal subset of images, which are now ready to be stitched
+    config["logger"].info("Starting new batch with image {} ...".format(start_idx))
     images, cv_features, matches, keypoint_dict, idx, filtered, finished, subset_image_names = prepare_OpenCV_objects(start_idx, config)
     
     #########################################################################################
@@ -1061,13 +1070,13 @@ def run_stitching_pipeline(start_idx, config):
             panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
             #If the panorama seems incorrect, use the same keypoints and try with a partial affine projection
             if not check_panorama(panorama, config):
-                print("Spherical stitching was unreliable, retrying with partial affine... consider reducing forward_limit or batch_size")
+                config["logger"].warning("Spherical stitching was unreliable, retrying with partial affine... consider reducing forward_limit or batch_size")
                 config["camera"] = "partial affine"
                 panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
                 config["camera"] = "spherical"
         except ValueError as e: #If bundle adjustment fails, fall back on a partial affine stitch with same keypoints instead
-            print(e)
-            print("Spherical stitching failed, retrying with partial affine... consider reducing forward_limit or batch_size")
+            config["logger"].warning(e)
+            config["logger"].warning("Spherical stitching failed, retrying with partial affine... consider reducing forward_limit or batch_size")
             config["camera"] = "partial affine"
             panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
             config["camera"] = "spherical"
@@ -1092,9 +1101,8 @@ def run_stitching_pipeline(start_idx, config):
         config["registration"][idx] = batch_dict
         image_range = idx - start_idx + 1
         images_used = len(images)
-        if config["verbose"]:
-            print('Used ', images_used, ' images of the initial ', image_range)
-        print(f'Saving image {idx} ...')
+        config["logger"].debug("Used {} images of the initial {}".format(images_used, image_range))
+        config["logger"].debug("Saving image {}".format(idx))
         cv2.imwrite(os.path.join(config["output_path"], str(idx) + "_"  + output_filename), panorama)
         return finished, idx, images_used
     else:
@@ -1105,13 +1113,11 @@ def run_stitching_pipeline(start_idx, config):
         new_panorama, new_idx, new_finished, images_used = retry_panorama(start_idx, filtered, config)
         #Use new panorama
         image_range = new_idx - start_idx + 1
-        if config["verbose"]:
-            print('Used ', images_used, ' images of the initial ', image_range)
-        print(f'Saving image {new_idx} ...')
+        config["logger"].debug("Used {} images of the initial {}".format(images_used, image_range))
+        config["logger"].debug("Saving image {}".format(idx))
         cv2.imwrite(os.path.join(config["output_path"], str(new_idx) + "_"  + output_filename), new_panorama)
         return new_finished, new_idx, images_used
 
-    
 def extract_all_batch_features(images, search_distance, config):
     ##################################################################
     #Use SuperPoint to extract keypoints and features from panoramas#
@@ -1172,14 +1178,14 @@ def match_batch_features(images, search_distance, config):
     #####################################################################
     #Extract panorama features and then match keypoints across panoramas#
     #####################################################################
-    print('Extracting batch features...')
+    config["logger"].info('Extracting batch features...')
     img_feats = extract_all_batch_features(images, search_distance, config)
     img_match_dict = {} #Dictionary to store matching keypoints and features
     for i in range(len(images)):
         img_match_dict[i] = {'keypoints': {'src': [], 'dst': []}, 'features': {'src': [], 'dst': []}}
     #Use LightGlue for matching
     matcher = LightGlue(features="superpoint").eval().to(config["device"])
-    print('Matching batch features...')
+    config["logger"].info('Matching batch features...')
     for i in range(len(images) - 1):
         feat_dict = {'image0': img_feats[i]['src'], 'image1': img_feats[i + 1]['dst']}
         img_matches = matcher(feat_dict)
@@ -1294,6 +1300,192 @@ def find_pano_corners(thresh, check, config):
             raise ValueError("Panorama corners were estimated poorly or the panorama is distorted")
     return closest_corners
 
+def make_spline(pts, spline_pts):
+    #######################################
+    #Convert 2D point set into spline with#
+    #set number of evenly spaced points   #
+    #######################################
+    dp = pts[1:, :] - pts[:-1, :] #Get vectors between points
+    l = (dp**2).sum(axis=1) #Get magnitude of vectors
+    vector = np.sqrt(l).cumsum() #Get magnitude of vectors 
+    vector = np.r_[0, vector] #Pad with 0
+    spl = sp.interpolate.make_interp_spline(vector, pts, axis=0)
+    uu = np.linspace(vector[0], vector[-1], spline_pts)
+    spline = np.round(spl(uu))
+    return spline
+
+def smooth_splines(top_contour_pts, bottom_contour_pts, spline_pts, config):
+    #################################################################
+    #Take top and bottom border points of image and down sample into#
+    #smooth splines by smoothing corners and rolling averages       #
+    #################################################################
+    
+    ################
+    #Smooth corners#
+    ################
+    smooth_corner_top = smooth_corners(top_contour_pts, True, config)
+    smooth_corner_bottom = smooth_corners(bottom_contour_pts, False, config)
+    
+    ##############
+    #Make splines#
+    ##############
+    top_spline = make_spline(smooth_corner_top, spline_pts)
+    bottom_spline = make_spline(smooth_corner_bottom, spline_pts)
+    mid_spline = np.mean(np.array([top_spline, bottom_spline]), axis = 0)
+    
+    ###################################
+    #Now smooth top and bottom splines#
+    ###################################
+    smooth_top_spline = np.copy(top_spline)
+    smooth_top_spline[:, 1] = smooth1D(top_spline[:, 1], config["points_per_image"])
+    smooth_bottom_spline = np.copy(bottom_spline)
+    smooth_bottom_spline[:, 1] = smooth1D(bottom_spline[:, 1], config["points_per_image"])
+    
+    ############################################################################
+    #But take the interior points  if the smooth spline would get a black pixel#
+    ############################################################################
+    smooth_top_spline[:, 1] = np.max(np.array([smooth_top_spline[:, 1], top_spline[:, 1]]), axis = 0)
+    smooth_bottom_spline[:, 1] = np.min(np.array([smooth_bottom_spline[:, 1], bottom_spline[:, 1]]), axis = 0)
+    mid_spline = np.mean(np.array([smooth_top_spline, smooth_bottom_spline]), axis = 0)
+    return mid_spline, smooth_top_spline, smooth_bottom_spline
+
+def smooth2D(pts, window):
+    ###########################################################
+    #Smooth x and y coordinates of array with a sliding window#
+    ###########################################################
+    x = np.pad(pts[:,0], (window//2, window - 1 - window//2), mode = 'edge')
+    y = np.pad(pts[:,1], (window//2, window - 1 - window//2), mode = 'edge')
+    smooth_x = np.convolve(x, np.ones((window,))/window, mode = 'valid')
+    smooth_y = np.convolve(y, np.ones((window,))/window, mode = 'valid')
+    smoothed = np.column_stack((smooth_x, smooth_y))
+    return smoothed
+
+def smooth1D(pts, window):
+    ######################################################
+    #Smooth 1D coordinates of array with a sliding window#
+    ######################################################
+    x = np.pad(pts, (window//2, window - 1 - window//2), mode = 'edge')
+    smooth_x = np.convolve(x, np.ones((window,))/window, mode = 'valid')
+    return smooth_x
+
+def find_consecutive_sequences(data):
+    #########################################
+    #Find sequences with consecutive indices#
+    #########################################
+    sequences = []
+    for k, g in itertools.groupby(enumerate(data), lambda x: x[0] - x[1]):
+        group = list(map(lambda x: x[1], g))
+        #############################################
+        #Return start and stop indices of each group#
+        #############################################
+        sequences.append([group[0], group[-1]])
+    return sequences
+
+def smooth_corners(spline_pts, top, config):
+    ##################################################
+    #Remove sharp corners where image edges stick out#
+    ##################################################
+    grad = np.gradient(spline_pts[:, 1])
+    grad = smooth1D(grad, config["points_per_image"])
+    idxs = np.where(np.abs(grad) > 0.75)[0]
+    
+    ####################################
+    #Find areas where the slope is high#
+    ####################################
+    sequences = find_consecutive_sequences(idxs)
+    smoothed = np.copy(spline_pts)
+    
+    ################################
+    #Smooth regions with high slope#
+    ################################
+    for i, j in sequences:
+        if spline_pts[i, 1] > spline_pts[j, 1]:
+            max_idx, min_idx = i, j
+            max_val, min_val = spline_pts[i, 1], spline_pts[j, 1]
+        else:
+            max_idx, min_idx = j, i
+            max_val, min_val = spline_pts[j, 1], spline_pts[i, 1]
+        ##########################################
+        #Distance over which to smooth the corner#
+        ##########################################
+        distance = (max_val - min_val)*10 #we set the slope to 0.1 to try to avoid sharp jumps
+        
+        #####################################################################
+        #Smooth corners to the interior of the image to minimize black space#
+        #####################################################################
+        if top:
+            if max_idx > min_idx:
+                start_idx, stop_idx = max_idx - distance, max_idx
+                start_idx = max(0, start_idx)
+                stop_idx = min(stop_idx, len(spline_pts) - 1)
+                start_val, stop_val = spline_pts[start_idx, 1], max_val
+            else:
+                start_idx, stop_idx = max_idx, max_idx + distance
+                start_idx = max(0, start_idx)
+                stop_idx = min(stop_idx, len(spline_pts) - 1)
+                start_val, stop_val = max_val, spline_pts[stop_idx, 1]
+        else:
+            if min_idx > max_idx:
+                start_idx, stop_idx = min_idx - distance, min_idx
+                start_idx = max(0, start_idx)
+                stop_idx = min(stop_idx, len(spline_pts) - 1)
+                start_val, stop_val = spline_pts[start_idx, 1], min_val
+            else:
+                start_idx, stop_idx = min_idx, min_idx + distance
+                start_idx = max(0, start_idx)
+                stop_idx = min(stop_idx, len(spline_pts) - 1)
+                start_val, stop_val = min_val, spline_pts[stop_idx, 1]
+                
+        ##################################
+        #Sand corners with constant slope#
+        ##################################
+        smoothed[start_idx:stop_idx, 1] = np.linspace(start_val, stop_val, stop_idx - start_idx, dtype = int)
+        
+        ##############################################
+        #Further smooth the spline after edge removal#
+        ##############################################
+        smoothed[:, 1] = smooth1D(smoothed[:, 1], config["points_per_image"])
+        #But keep interior points
+        if top:
+            smoothed[:, 1] = np.max(np.array([smoothed[:, 1], spline_pts[:, 1]]), axis = 0)
+        else:
+            smoothed[:, 1] = np.min(np.array([smoothed[:, 1], spline_pts[:, 1]]), axis = 0)
+    return smoothed
+
+def find_peaks_ids(smooth_ddy, max_space, config):
+    #######################################################################
+    #Find areas with high curvature based on the second derivative        #
+    #of the vertical coordinates where the panorama should be sliced      #
+    #as well as periodic slice points so that there are no sections longer#
+    #than max_space                                                       #
+    #######################################################################
+    pos_peaks, _ = sp.signal.find_peaks(smooth_ddy, height = config["straightening_threshold"], distance = config["points_per_image"])
+    neg_peaks, _ = sp.signal.find_peaks(-1*smooth_ddy, height = config["straightening_threshold"], distance = config["points_per_image"])
+    peak_idxs = np.concatenate((pos_peaks, neg_peaks))
+    peak_idxs = np.sort(peak_idxs)
+    #Add first and last spline point
+    peak_idxs = np.insert(peak_idxs, 0, [0])
+    peak_idxs = np.append(peak_idxs, [len(smooth_ddy) - 1])
+    
+    #####################################################
+    #Slice the panorama at peaks and add in slice points#
+    #in between peaks if the gaps are large             #
+    #####################################################
+    #If the panorama is very long, we need more spline points so that the
+    #midline captures the panorama curvature and to avoid hitting the upper limit on
+    #OpenCV image size that can be used in warpPerspective (SHRT_MAX)
+    spaced_idxs = [peak_idxs[0]]
+    for i in range(1, len(peak_idxs)):
+        diff = peak_idxs[i] - peak_idxs[i-1]
+        if diff > max_space:
+            num_inserts = int(diff // max_space)
+            increment = diff / (num_inserts + 1)
+            for j in range(1, num_inserts + 1):
+                spaced_idxs.append(round(peak_idxs[i-1] + increment * j))
+        spaced_idxs.append(peak_idxs[i])
+    spaced_idxs = np.array(spaced_idxs)
+    return spaced_idxs
+
 def make_smooth_border_splines(thresh, corners, spline_pts, config):
     ###############################################################
     #Generate points along the top and bottom border of a panorama#
@@ -1328,29 +1520,14 @@ def make_smooth_border_splines(thresh, corners, spline_pts, config):
     #############################
     splines = smooth_splines(top_contour_pts, bottom_contour_pts, spline_pts, config)
     mid_spline, smooth_top_spline, smooth_bottom_spline = splines
-    # smooth_mid_spline = np.mean(np.array([smooth_top_spline, smooth_bottom_spline]), axis = 0)
-    #Use the smoothed mid spline to clip the top and bottom splines to
-    #the minimum height
-    # height = int(np.min(smooth_bottom_spline[:, 1] - smooth_top_spline[:, 1]))
-    # clipped_top_spline = smooth_mid_spline - np.array([0, height//2])
-    # clipped_bottom_spline = smooth_mid_spline + np.array([0, height//2])
-    # return clipped_top_spline, clipped_bottom_spline, mid_spline
-
+    
+    ###################################################
+    #Standardize heights by cropping to minimum height#
+    ###################################################
+    height = int(np.min(smooth_bottom_spline[:, 1] - smooth_top_spline[:, 1]))
+    top_contour_pts = mid_spline - np.array([0, height//2])
+    bottom_contour_pts = mid_spline + np.array([0, height//2])
     return smooth_top_spline, smooth_bottom_spline, mid_spline
-
-def make_spline(pts, spline_pts):
-    #######################################
-    #Convert 2D point set into spline with#
-    #set number of evenly spaced points   #
-    #######################################
-    dp = pts[1:, :] - pts[:-1, :] #Get vectors between points
-    l = (dp**2).sum(axis=1) #Get magnitude of vectors
-    vector = np.sqrt(l).cumsum() #Get magnitude of vectors 
-    vector = np.r_[0, vector] #Pad with 0
-    spl = sp.interpolate.make_interp_spline(vector, pts, axis=0)
-    uu = np.linspace(vector[0], vector[-1], spline_pts)
-    spline = np.round(spl(uu))
-    return spline
 
 def divide_splines(top_spline, bottom_spline, mid_spline, spline_pts, max_space, config):
     ############################################################################
@@ -1361,10 +1538,9 @@ def divide_splines(top_spline, bottom_spline, mid_spline, spline_pts, max_space,
     top_bottom_distances = bottom_spline - top_spline
     top_bottom_distances = np.sqrt((top_bottom_distances**2).sum(axis = 1))
     rectangular_height = np.round(np.median(top_bottom_distances)).astype(int)
-    # rectangular_height = np.round(np.min(top_bottom_distances)).astype(int)
     mid_vector = (mid_spline[1:, :] - mid_spline[:-1, :])
     mid_widths = np.sqrt((mid_vector**2).sum(axis = 1))
-    mid_widths = np.round(mid_widths).astype(int)
+    mid_widths = mid_widths.astype(int)
     rectangular_width = np.sum(mid_widths)
     cumulative_widths = np.append(np.array([0]), np.cumsum(mid_widths)).astype(int)
     
@@ -1387,6 +1563,29 @@ def divide_splines(top_spline, bottom_spline, mid_spline, spline_pts, max_space,
     #Return slice corners and widths as well as the final width and height to project into
     return corners, rectangular_width, rectangular_height, widths
 
+def make_batch_splines(thresh, t_start, t_stop, b_start, b_stop, spline_pts, config):
+    ###################################
+    #Get contour points for boundaries#
+    ###################################
+    top_contour_pts = []
+    bottom_contour_pts = []    
+    for x in range(t_start, t_stop):
+        pix = np.where(thresh[:, x] > 0)[0]
+        if len(pix) > 0:
+            top_contour_pts.append([x, np.min(pix)])
+    for x in range(b_start, b_stop):
+        pix = np.where(thresh[:, x] > 0)[0]
+        if len(pix) > 0:
+            bottom_contour_pts.append([x, np.max(pix)])
+    top_contour_pts = np.array(top_contour_pts)
+    bottom_contour_pts = np.array(bottom_contour_pts)
+
+    ###################################
+    #Use points to make smooth splines#
+    ###################################
+    splines = smooth_splines(top_contour_pts, bottom_contour_pts, spline_pts, config)
+    mid_spline, smooth_top_spline, smooth_bottom_spline = splines
+    return mid_spline, smooth_top_spline, smooth_bottom_spline
 
 def anchor_edge_images(img, config):
     ##########################################################################
@@ -1402,23 +1601,24 @@ def anchor_edge_images(img, config):
     ##############################################################################
     #First try to clean the edges of the batch so the anchor images "stand alone"#
     ##############################################################################
-    thresh, start, stop = mask_anchor_images(img, config)
-    
+    thresh, t_start, t_stop, b_start, b_stop = mask_anchor_images(img, config)
+    start = min(t_start, b_start)
+    stop = max(t_stop, b_stop)
     spline_pts = max(config["points_per_image"], int(config["points_per_image"]*((stop - start)/config["img_dims"][0])))
-    splines = make_batch_splines(thresh, start, stop, spline_pts, config)
+    splines = make_batch_splines(thresh, t_start, t_stop, b_start, b_stop, spline_pts, config)
     mid_spline, smooth_top_spline, smooth_bottom_spline = splines
     
     ########################################
     #Get anchor points, widths, and heights#
     ########################################
     top_anchors, bottom_anchors, mid_anchors = get_all_anchor_points(mid_spline, smooth_top_spline, smooth_bottom_spline, spline_pts, config)
-    anchor_heights = np.linalg.norm(bottom_anchors - top_anchors, axis = 1).astype(int)
-    anchor_widths = np.linalg.norm(mid_anchors[1:, :] - mid_anchors[:-1, :], axis = 1).astype(int)
-    anchor_heights = np.array([[anchor_heights[i], anchor_heights[i + 1]] for i in range(len(anchor_widths))])
+    heights = np.linalg.norm(bottom_anchors - top_anchors, axis = 1).astype(int)
+    mid_vector = (mid_anchors[1:, :] - mid_anchors[:-1, :])
+    widths = np.sqrt((mid_vector**2).sum(axis = 1)).astype(int)
     slice_corners = np.array([[top_anchors[i], top_anchors[i + 1], 
                                bottom_anchors[i + 1], bottom_anchors[i]] 
-                               for i in range(len(anchor_widths))], dtype = int)
-    return slice_corners, anchor_widths, anchor_heights      
+                               for i in range(len(widths))], dtype = int)
+    return slice_corners, widths, heights      
 
 def mask_anchor_images(img, config):
     #########################################################################
@@ -1543,57 +1743,7 @@ def mask_anchor_images(img, config):
     thresh = thresh[100:-100, 100:-100]
     top_start, top_stop = top_left[0] - 100, top_right[0] - 100
     bottom_start, bottom_stop = bottom_left[0] - 100, bottom_right[0] - 100
-    start = max(top_start, bottom_start)
-    stop = min(top_stop, bottom_stop)
-    return thresh, start, stop
-
-def smooth_splines(top_contour_pts, bottom_contour_pts, spline_pts, config):
-    ################
-    #Smooth corners#
-    ################
-    smooth_corner_top = smooth_corners(top_contour_pts, True, config)
-    smooth_corner_bottom = smooth_corners(bottom_contour_pts, False, config)
-    
-    ##############
-    #Make splines#
-    ##############
-    top_spline = make_spline(smooth_corner_top, spline_pts)
-    bottom_spline = make_spline(smooth_corner_bottom, spline_pts)
-    #Do not smooth mid spline
-    mid_spline = np.mean(np.array([top_spline, bottom_spline]), axis = 0)
-
-    #Now smooth top and bottom splines
-    smooth_top_spline = np.copy(top_spline)
-    smooth_top_spline[:, 1] = smooth1D(top_spline[:, 1], config["points_per_image"])
-    
-    smooth_bottom_spline = np.copy(bottom_spline)
-    smooth_bottom_spline[:, 1] = smooth1D(bottom_spline[:, 1], config["points_per_image"])
-    #But take the interior points only if the smooth spline would get a black pixel
-    # smooth_top_spline[:, 1] = np.max(np.array([smooth_top_spline[:, 1], top_spline[:, 1]]), axis = 0)
-    # smooth_bottom_spline[:, 1] = np.min(np.array([smooth_bottom_spline[:, 1], bottom_spline[:, 1]]), axis = 0)
-    return mid_spline, smooth_top_spline, smooth_bottom_spline
-
-def make_batch_splines(thresh, start, stop, spline_pts, config):
-    ###################################
-    #Get contour points for boundaries#
-    ###################################
-    top_contour_pts = []
-    bottom_contour_pts = []    
-    for x in range(start, stop):
-        pix = np.where(thresh[:, x] > 0)[0]
-        if len(pix) > 0:
-            top_contour_pts.append([x, np.min(pix)])
-            bottom_contour_pts.append([x, np.max(pix)])
-            
-    top_contour_pts = np.array(top_contour_pts)
-    bottom_contour_pts = np.array(bottom_contour_pts)
-
-    ###################################
-    #Use points to make smooth splines#
-    ###################################
-    splines = smooth_splines(top_contour_pts, bottom_contour_pts, spline_pts, config)
-    mid_spline, smooth_top_spline, smooth_bottom_spline = splines
-    return mid_spline, smooth_top_spline, smooth_bottom_spline
+    return thresh, top_start, top_stop, bottom_start, bottom_stop
 
 def get_all_anchor_points(mid_spline, smooth_top_spline, smooth_bottom_spline, spline_pts, config):
     scaled_spline = (mid_spline[:, 1]/((mid_spline[-1, 0] - mid_spline[0, 0])/spline_pts))
@@ -1608,49 +1758,16 @@ def get_all_anchor_points(mid_spline, smooth_top_spline, smooth_bottom_spline, s
     top_anchors = np.array(top_anchors)
     bottom_anchors = np.array(bottom_anchors)
     
-    ######################
-    #Make straight slices#
-    ######################
+    ########################################################
+    #Make straight slices so there is no warping distortion#
+    ########################################################
+    #This sacrifices some field of view at the edges, but should eliminate
+    #straightening seams
     mid_anchors = np.mean([top_anchors, bottom_anchors], axis = 0)
     top_anchors[:, 0] = np.copy(mid_anchors[:, 0].astype(int))
     bottom_anchors[:, 0] = np.copy(mid_anchors[:, 0].astype(int))
-    
     return top_anchors, bottom_anchors, mid_anchors
 
-def find_peaks_ids(smooth_ddy, max_space, config):
-    #######################################################################
-    #Find areas with high curvature based on the second derivative        #
-    #of the vertical coordinates where the panorama should be sliced      #
-    #as well as periodic slice points so that there are no sections longer#
-    #than max_space                                                       #
-    #######################################################################
-    pos_peaks, _ = sp.signal.find_peaks(smooth_ddy, height = config["straightening_threshold"], distance = config["points_per_image"])
-    neg_peaks, _ = sp.signal.find_peaks(-1*smooth_ddy, height = config["straightening_threshold"], distance = config["points_per_image"])
-    peak_idxs = np.concatenate((pos_peaks, neg_peaks))
-    peak_idxs = np.sort(peak_idxs)
-    #Add first and last spline point
-    peak_idxs = np.insert(peak_idxs, 0, [0])
-    peak_idxs = np.append(peak_idxs, [len(smooth_ddy) - 1])
-    
-    #####################################################
-    #Slice the panorama at peaks and add in slice points#
-    #in between peaks if the gaps are large             #
-    #####################################################
-    #If the panorama is very long, we need more spline points so that the
-    #midline captures the panorama curvature and to avoid hitting the upper limit on
-    #OpenCV image size that can be used in warpPerspective (SHRT_MAX)
-    spaced_idxs = [peak_idxs[0]]
-    for i in range(1, len(peak_idxs)):
-        diff = peak_idxs[i] - peak_idxs[i-1]
-        if diff > max_space:
-            num_inserts = int(diff // max_space)
-            increment = diff / (num_inserts + 1)
-            for j in range(1, num_inserts + 1):
-                spaced_idxs.append(round(peak_idxs[i-1] + increment * j))
-        spaced_idxs.append(peak_idxs[i])
-    spaced_idxs = np.array(spaced_idxs)
-    return spaced_idxs
-    
 def warp_slice(img, slice_corners, width, height, registration_dict, keys, offset, config):
     ################################################
     #For a given quadrilateral slice of a panorama,#
@@ -1688,154 +1805,6 @@ def warp_slice(img, slice_corners, width, height, registration_dict, keys, offse
         registration_dict[keys[i]] = global_point
     return warped
 
-def warp_rhombus(img, slice_corners, width, heights, full_height, registration_dict, keys, offset, config):
-    ################################################
-    #For a given quadrilateral slice of a panorama,#
-    #warp into a rectangle                         #
-    ################################################
-    #A mask to isolate each slice, passed each time because modified in place with fillConvexPoly
-    blank_mask = np.zeros((img.shape[0], img.shape[1]), np.uint8)
-    #Mask everything but the slice, fillConvexPoly modifies mask in place, so we pass a fresh copy each time
-    rect_mask = cv2.fillConvexPoly(blank_mask, slice_corners.reshape((-1, 1, 2)).astype(np.int32), 255)
-    rect_img = cv2.bitwise_and(img, img, mask=rect_mask)
-    #Resize the slice so it is in its in a rectangular bounding box
-    rect_mask_corners = np.where(rect_mask == 255)
-    maxy, maxx, miny, minx = np.max(rect_mask_corners[0]), np.max(rect_mask_corners[1]), np.min(rect_mask_corners[0]),  np.min(rect_mask_corners[1])
-    rect_mask_bb = rect_img[miny:maxy, minx:maxx]
-
-    ##########################################
-    #Get target points for a centered rhombus#
-    ##########################################
-    pad1, pad2 = (full_height - heights[0])//2, (full_height - heights[1])//2
-    rhombus_points = np.array([[0, pad1], [width, pad2], [width, full_height - pad2], [0, full_height - pad1]])
-    rect_points = np.array([[0, 0], [width, 0], [width, full_height], [0, full_height]])
-    
-    #######################################
-    #Recenter corners to local coordinates#
-    #######################################
-    translated_corners = np.copy(slice_corners)
-    translated_corners[:, 0] -= minx
-    translated_corners[:, 1] -= miny
-    
-    ######################################################################
-    #Get perspective transform from slice to a rhombus and warp the slice#
-    ######################################################################
-    H = cv2.getPerspectiveTransform(translated_corners.astype(np.float32), rhombus_points.astype(np.float32))
-    H = cv2.getPerspectiveTransform(translated_corners.astype(np.float32), rect_points.astype(np.float32))
-    warped = cv2.warpPerspective(rect_mask_bb, H, (width, full_height))
-    
-    ####################
-    #Warp registrations#
-    ####################
-    for i in range(len(keys)):
-        point = registration_dict[keys[i]].copy()
-        #Translate point to local slice coordinates
-        local_point = point - np.array([minx, miny])
-        warped_point = cv2.perspectiveTransform(np.reshape(local_point, (1, 1, 2)), H)[0][0]
-        #Translate back to global x coordinates by the global start of this slice
-        global_point = warped_point + np.array([offset, 0])
-        registration_dict[keys[i]] = global_point
-    return warped
-
-
-def smooth2D(pts, window):
-    ###########################################################
-    #Smooth x and y coordinates of array with a sliding window#
-    ###########################################################
-    x = np.pad(pts[:,0], (window//2, window - 1 - window//2), mode = 'edge')
-    y = np.pad(pts[:,1], (window//2, window - 1 - window//2), mode = 'edge')
-    smooth_x = np.convolve(x, np.ones((window,))/window, mode = 'valid')
-    smooth_y = np.convolve(y, np.ones((window,))/window, mode = 'valid')
-    smoothed = np.column_stack((smooth_x, smooth_y))
-    return smoothed
-
-def smooth1D(pts, window):
-    ######################################################
-    #Smooth 1D coordinates of array with a sliding window#
-    ######################################################
-    x = np.pad(pts, (window//2, window - 1 - window//2), mode = 'edge')
-    smooth_x = np.convolve(x, np.ones((window,))/window, mode = 'valid')
-    return smooth_x
-
-def find_consecutive_sequences(data):
-    #########################################
-    #Find sequences with consecutive indices#
-    #########################################
-    sequences = []
-    for k, g in itertools.groupby(enumerate(data), lambda x: x[0] - x[1]):
-        group = list(map(lambda x: x[1], g))
-        #############################################
-        #Return start and stop indices of each group#
-        #############################################
-        sequences.append([group[0], group[-1]])
-    return sequences
-
-def smooth_corners(spline_pts, top, config):
-    ##################################################
-    #Remove sharp corners where image edges stick out#
-    ##################################################
-    grad = np.gradient(spline_pts[:, 1])
-    grad = smooth1D(grad, 10)
-    idxs = np.where(np.abs(grad) > 1)[0]
-    
-    ####################################
-    #Find areas where the slope is high#
-    ####################################
-    sequences = find_consecutive_sequences(idxs)
-    smoothed = np.copy(spline_pts)
-    
-    ################################
-    #Smooth regions with high slope#
-    ################################
-    for i, j in sequences:
-        if spline_pts[i, 1] > spline_pts[j, 1]:
-            max_idx, min_idx = i, j
-            max_val, min_val = spline_pts[i, 1], spline_pts[j, 1]
-        else:
-            max_idx, min_idx = j, i
-            max_val, min_val = spline_pts[j, 1], spline_pts[i, 1]
-        ##########################################
-        #Distance over which to smooth the corner#
-        ##########################################
-        distance = (max_val - min_val)*10 #we set the slope to 0.1 to try to avoid sharp jumps
-        
-        #####################################################################
-        #Smooth corners to the interior of the image to minimize black space#
-        #####################################################################
-        if top:
-            if max_idx > min_idx:
-                start_idx, stop_idx = max_idx - distance, max_idx
-                start_idx = max(0, start_idx)
-                stop_idx = min(stop_idx, len(spline_pts) - 1)
-                start_val, stop_val = spline_pts[start_idx, 1], max_val
-            else:
-                start_idx, stop_idx = max_idx, max_idx + distance
-                start_idx = max(0, start_idx)
-                stop_idx = min(stop_idx, len(spline_pts) - 1)
-                start_val, stop_val = max_val, spline_pts[stop_idx, 1]
-        else:
-            if min_idx > max_idx:
-                start_idx, stop_idx = min_idx - distance, min_idx
-                start_idx = max(0, start_idx)
-                stop_idx = min(stop_idx, len(spline_pts) - 1)
-                start_val, stop_val = spline_pts[start_idx, 1], min_val
-            else:
-                start_idx, stop_idx = min_idx, min_idx + distance
-                start_idx = max(0, start_idx)
-                stop_idx = min(stop_idx, len(spline_pts) - 1)
-                start_val, stop_val = min_val, spline_pts[stop_idx, 1]
-                
-        ##################################
-        #Sand corners with constant slope#
-        ##################################
-        smoothed[start_idx:stop_idx, 1] = np.linspace(start_val, stop_val, stop_idx - start_idx, dtype = int)
-        
-        ##############################################
-        #Further smooth the spline after edge removal#
-        ##############################################
-        smoothed[:, 1] = smooth1D(smoothed[:, 1], config["points_per_image"])
-    return smoothed
-
 def warp_mosaic(img, all_corners, rectangular_width, rectangular_height, widths, config):
     ###########################################
     #Link registration points with warp slices#
@@ -1870,7 +1839,6 @@ def warp_batch(img, corners, widths, heights, batch, config):
     positions = np.array(list(registration_dict.values())).copy()
     x_positions = positions[:,0]
     cumulative_widths = np.append(np.array([0]), np.cumsum(widths)).astype(int)
-    # max_ht = np.max(heights)
     median_ht = int(np.median(heights))
     
     ###########################
@@ -1882,11 +1850,8 @@ def warp_batch(img, corners, widths, heights, batch, config):
         key_idxs = np.where((x_positions >= cumulative_widths[i]) & (x_positions < cumulative_widths[i + 1]))[0]
         keys = [img_keys[i] for i in key_idxs]
         #Corners of the sliced quadrilateral with top left, top right, bottom right, bottom left
-        # warped_quad = warp_rhombus(img, corners[i], widths[i], heights[i], max_ht,
-        #                             registration_dict, keys, cumulative_widths[i], config)
         warped = warp_slice(img, corners[i], widths[i], median_ht, registration_dict, keys, cumulative_widths[i], config)
         blank[:, cumulative_widths[i]: cumulative_widths[i + 1]] = warped
-        # blank[:, cumulative_widths[i]: cumulative_widths[i + 1]] = warped_quad
     return blank.astype(np.uint8)
 
 def straighten_batch(img, batch, config):
@@ -1910,7 +1875,6 @@ def straighten_mosaic(img, config):
     image_widths = round(thresh.shape[1]/config["img_dims"][0])
     #Since we smooth the splines, we need some minimum number of points
     spline_pts = max(config["points_per_image"], int(image_widths * config["points_per_image"]))
-
     #Threshold past which another slice should be made, regardless of curvature
     #in units of original image widths
     slice_threshold = 5*config["points_per_image"]
@@ -1922,7 +1886,6 @@ def straighten_mosaic(img, config):
     top_spline, bottom_spline, mid_spline = make_smooth_border_splines(thresh, corners, spline_pts, config)
     slice_corners, rectangular_width, rectangular_height, widths = divide_splines(top_spline, bottom_spline, mid_spline,
                                                                                   spline_pts, slice_threshold, config)
-
     #############################
     #Slice and warp final mosaic#
     #############################
@@ -2046,7 +2009,7 @@ def resize_panorama(panorama, config):
         #Invalid resizing parameters#
         #############################
         else:
-            print("Invalid resizing parameters")
+            config["logger"].warning("Invalid resizing parameters")
             final_size = panorama
             scalex, scaley, padx, pady = 1.0, 1.0, 0, 0
     #############
@@ -2062,7 +2025,7 @@ def stitch_final_mosaic(config):
     #######################################################################
     #Take existing panoramas and stitch them into one final super panorama#
     #######################################################################
-    print("Retrieving batches...")
+    config["logger"].info("Retrieving batches...")
     
     ##################################################
     #Read in the previously created panoramas and pad#
@@ -2086,7 +2049,7 @@ def stitch_final_mosaic(config):
     #but to assume that the no rotation is necessary to stitch the panoramas, we should ensure that the edges of the panorama
     #are normal to the camera movement. Since deviations of the camera orientation from the normal plane will cause curving
     #in the panoramas, we pre-straighten the panoramas to make the super panorama stitching easier
-    print("Straightening batches...")
+    config["logger"].info("Straightening batches...")
     adjusted_imgs = [straighten_batch(image, i, config) for i, image in enumerate(batch_imgs)]
     if config["save_output"]:
         for i, img in enumerate(adjusted_imgs):
@@ -2108,7 +2071,7 @@ def stitch_final_mosaic(config):
     search_distance = int(config["img_dims"][0] *1.0)
     img_matches = match_batch_features(adjusted_imgs, search_distance, config)
     cv_features, matches, img_keypoints = build_panorama_opencv_objects(adjusted_imgs, img_matches)
-    print("Stitching batches...")
+    config["logger"].info("Stitching batches...")
     final_mosaic, corners, sizes = affine_OpenCV_pipeline(adjusted_imgs, img_keypoints, True, config)
     if config["save_output"]:
         cv2.imwrite(os.path.join(config["output_path"], "unstraightened_mosaic.png"), final_mosaic)
@@ -2134,19 +2097,19 @@ def stitch_final_mosaic(config):
     ###########################
     save_final_mosaic(final_mosaic, config)
     if not config["save_output"]:
-        print('Deleting intermediate images...')
+        config["logger"].info('Deleting intermediate images...')
         shutil.rmtree(config["output_path"])
-    print("Done")
+    config["logger"].info("Done")
     
 def run_batches(config):
     ####################################
     #Prepare directory to store outputs#
     ####################################
     if not os.path.exists(config["output_path"]):
-        print("Creating ", config["output_path"])
+        config["logger"].info("Creating {}".format(config["output_path"]))
         os.makedirs(config["output_path"])
     else:
-        print("Deleting existing contents in ", config["output_path"])
+        config["logger"].info("Deleting existing contents in {}".format(config["output_path"]))
         for root, dirs, files in os.walk(config["output_path"], topdown=False):
             for name in files:
                 os.remove(os.path.join(root, name))
@@ -2168,7 +2131,8 @@ def run_batches(config):
         final_img_count += img_count - 1
         batch_keys.append(start_idx)
     final_img_count += 1
-    print("Used ", final_img_count, " of initial images in final mosaic")
+    config["logger"].info("Used {} of initial images in final mosaic".format(final_img_count))
+    
     ######################################################################
     #If all panorama batches were successful, attempt to stitch them into#
     #the final super panorama.                                           #
@@ -2185,22 +2149,22 @@ def run_batches(config):
         config["registration"] = config["registration"][start_idx]
         save_final_mosaic(final_mosaic, config)
         if not config["save_output"]:
-            print('Deleting intermediate images...')
+            config["logger"].info('Deleting intermediate images...')
             shutil.rmtree(config["output_path"])
-        print("Done")
+        config["logger"].info("Done")
 
 def save_final_mosaic(mosaic, config):
     ##############################
     #Check that write path exists#
     ##############################
-    if not os.path.exists(config["final_panorama_path"]):
-        print("Creating ", config["final_panorama_path"])
-        os.makedirs(config["final_panorama_path"])
+    if not os.path.exists(config["final_mosaic_path"]):
+        config["logger"].info("Creating {}".format(config["final_mosaic_path"]))
+        os.makedirs(config["final_mosaic_path"])
     ############
     #Straighten#
     ############
     if config["final_straighten"]:
-        print("Straightening final mosaic...")
+        config["logger"].info("Straightening final mosaic...")
         mosaic = straighten_mosaic(mosaic, config)
     ##################################
     #Extract registration information#
@@ -2223,7 +2187,7 @@ def save_final_mosaic(mosaic, config):
     #Reorient#
     ##########
     if config["change_orientation"] is not False:
-        print("Re-orienting panorama...")
+        config["logger"].info("Re-orienting panorama...")
         if config["change_orientation"] == '180':
             #Flip image across vertical axis so the stitching edge is now on the right
             mosaic = cv2.flip(mosaic, 1)
@@ -2273,28 +2237,28 @@ def save_final_mosaic(mosaic, config):
                     mosaic = cv2.flip(mosaic, 1)
                     GPS_data["x"] = mosaic.shape[1] - GPS_data["x"]
         else:
-            print("Invalid orientation")
+            config["logger"].warning("Invalid orientation")
             
     ############
     #Save files#
     ############
     if config["save_full_resolution"]:
-        print("Saving at full resolution...")
-        cv2.imwrite(os.path.join(config["final_panorama_path"], "full_res_" + config["final_panorama_name"]), mosaic)
-        GPS_data.to_csv(os.path.join(config["final_panorama_path"], "full_res_" + register_name))
+        config["logger"].info("Saving mosaic at full resolution...")
+        cv2.imwrite(os.path.join(config["final_mosaic_path"], "full_res_" + config["final_mosaic_name"]), mosaic)
+        GPS_data.to_csv(os.path.join(config["final_mosaic_path"], "full_res_" + register_name))
     if config["save_resized_resolution"]:
         mosaic, scalex, scaley, padx, pady = resize_panorama(mosaic, config)
-        print("Saving at resized resolution...")
-        cv2.imwrite(os.path.join(config["final_panorama_path"], "resized_" + config["final_panorama_name"]), mosaic)
+        config["logger"].info("Saving mosaic at resized resolution...")
+        cv2.imwrite(os.path.join(config["final_mosaic_path"], "resized_" + config["final_mosaic_name"]), mosaic)
         GPS_data["x"] *= scalex
         GPS_data["y"] *= scaley
         GPS_data["x"] += padx
         GPS_data["y"] += pady
-        GPS_data.to_csv(os.path.join(config["final_panorama_path"], "resized_" + register_name))
+        GPS_data.to_csv(os.path.join(config["final_mosaic_path"], "resized_" + register_name))
     if config["save_low_resolution"]:
-        print('Saving a low resolution version of the panorama ...')
+        config["logger"].info('Saving a low resolution version of the mosaic ...')
         mosaic = cv2.resize(mosaic, dsize = None, fx = config["low_resolution"], fy = config["low_resolution"])
-        cv2.imwrite(os.path.join(config["final_panorama_path"], "low_res_" + config["final_panorama_name"]), mosaic)
+        cv2.imwrite(os.path.join(config["final_mosaic_path"], "low_res_" + config["final_mosaic_name"]), mosaic)
 
 
 def sorted_nicely(l): 
@@ -2350,15 +2314,15 @@ def load_config(config_path):
         data_type, secondary = type_dict[key]
         if not isinstance(value, data_type):
             safe = False
-            print(key, " has incorrect type. Expected ", data_type)
+            raise TypeError("{} has incorrect type. Expected {}".format(key, data_type))
         if isinstance(secondary, list):
             if not value in secondary:
                 safe = False
-                print(key, " has an invalid value. Expected ", secondary)
+                raise TypeError("{} has an invalid value. Expected {}".format(key, secondary))
         if isinstance(secondary, type):
             if not all(isinstance(item, secondary) for item in value):
                 safe = False
-                print(key, " has incorrect type. Expected a list of ", type)
+                raise TypeError("{} has incorrect type. Expected a list of {}".format(key, secondary))
                 
     # Adjust device setting based on the string from config
     config["device"] = torch.device(config["device"] if torch.cuda.is_available() and config["device"] == "cuda" else "cpu")
@@ -2376,8 +2340,34 @@ def adjust_config(config, image_directory, parent_directory):
     #################################################
     output_dir = os.path.basename(os.path.normpath(config["image_directory"])) + '_output'
     config["output_path"] =  os.path.join(parent_directory, output_dir)
-    config["final_panorama_path"] = os.path.join(parent_directory, "final_panoramas")
-    config["final_panorama_name"] = "mosaic_" + os.path.basename(os.path.normpath(config["image_directory"])) + '.png'
+    config["final_mosaic_path"] = os.path.join(parent_directory, "final_mosaics")
+    config["final_mosaic_name"] = "mosaic_" + os.path.basename(os.path.normpath(config["image_directory"])) + '.png'
+
+    ######################################################################
+    #Configure logger and change level based on verbose setting in config#
+    ######################################################################
+    log_path = os.path.join(config["final_mosaic_path"],  os.path.basename(os.path.normpath(config["image_directory"])) + '.log')
+    #Make log if it doesn't exist
+    if not os.path.exists(log_path):
+        open(log_path, 'a').close()
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)  
+    logger.propagate = False
+    stream_handler = logging.StreamHandler()
+    file_handler = logging.FileHandler(log_path, mode = 'w')
+    if config["verbose"]:
+        stream_handler.setLevel(logging.INFO)
+        file_handler.setLevel(logging.DEBUG)
+    else:
+        stream_handler.setLevel(logging.WARNING)
+        file_handler.setLevel(logging.INFO)
+    log_format =  logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    stream_format = logging.Formatter('%(message)s')
+    stream_handler.setFormatter(stream_format)
+    file_handler.setFormatter(log_format)
+    logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
+    config["logger"] = logger
     
     #############################################################
     #Recover the original image dimensions used for the panorama#
@@ -2397,9 +2387,15 @@ def adjust_config(config, image_directory, parent_directory):
                                usecols = ["image", "latitude", "longitude"])
         gps_data["x"] = np.zeros((len(gps_data)))
         gps_data["y"] = np.zeros((len(gps_data)))
-        print("Found GPS data...")
+        config["logger"].info("Found GPS data...")
         config["GPS_data"] = gps_data
-    print("Configuration loaded successfully...")
+    config["logger"].info("Configuration loaded successfully...")
+    
+    ####################################################################################
+    #Disable OpenCL because it has memory limits that will interfere with large mosaics#
+    ####################################################################################
+    config["logger"].info('Disabling OpenCL to try to avoid memory issues')
+    cv2.ocl.setUseOpenCL(False)
     return config
 
 def run(config_path):
@@ -2407,8 +2403,6 @@ def run(config_path):
     if not safe:
         return
     start_time = time.perf_counter()
-    print('Disabling OpenCL to try to avoid memory issues')
-    cv2.ocl.setUseOpenCL(False)
     if "image_directory" in base_config:
         parent_directory = os.path.dirname(os.path.normpath(base_config["image_directory"]))
         config = adjust_config(base_config, base_config["image_directory"], parent_directory)
@@ -2422,12 +2416,12 @@ def run(config_path):
             try:
                 run_batches(config)
             except ValueError as e:
-                print(f"Error {e} caused failure for panorama {image_directory}")                
+                config["logger"].error("Error {} caused failure for panorama {}".format(e, image_directory))                
     else:
         print("Specify either image_directory or parent_directory")
     end_time = time.perf_counter()
     elapsed_time = (end_time - start_time)/60
-    print(f"Elapsed time: {elapsed_time:.2f} minutes")
+    config["logger"].info("Elapsed time: {:.2f} minutes".format(elapsed_time))
     
 if __name__ == "__main__":
     config_path = sys.argv[1]
