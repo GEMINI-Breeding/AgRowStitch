@@ -2154,12 +2154,6 @@ def run_batches(config):
         config["logger"].info("Done")
 
 def save_final_mosaic(mosaic, config):
-    ##############################
-    #Check that write path exists#
-    ##############################
-    if not os.path.exists(config["final_mosaic_path"]):
-        config["logger"].info("Creating {}".format(config["final_mosaic_path"]))
-        os.makedirs(config["final_mosaic_path"])
     ############
     #Straighten#
     ############
@@ -2342,6 +2336,13 @@ def adjust_config(config, image_directory, parent_directory):
     config["output_path"] =  os.path.join(parent_directory, output_dir)
     config["final_mosaic_path"] = os.path.join(parent_directory, "final_mosaics")
     config["final_mosaic_name"] = "mosaic_" + os.path.basename(os.path.normpath(config["image_directory"])) + '.png'
+
+    ##############################
+    #Check that write path exists#
+    ##############################
+    if not os.path.exists(config["final_mosaic_path"]):
+        config["logger"].info("Creating {}".format(config["final_mosaic_path"]))
+        os.makedirs(config["final_mosaic_path"])
 
     ######################################################################
     #Configure logger and change level based on verbose setting in config#
