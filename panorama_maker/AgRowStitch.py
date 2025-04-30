@@ -1387,7 +1387,7 @@ def smooth_corners(spline_pts, top, config):
     ##################################################
     grad = np.gradient(spline_pts[:, 1])
     grad = smooth1D(grad, config["points_per_image"])
-    idxs = np.where(np.abs(grad) > 0.75)[0]
+    idxs = np.where(np.abs(grad) > 1.0)[0]
     
     ####################################
     #Find areas where the slope is high#
@@ -1408,7 +1408,7 @@ def smooth_corners(spline_pts, top, config):
         ##########################################
         #Distance over which to smooth the corner#
         ##########################################
-        distance = (max_val - min_val)*10 #we set the slope to 0.1 to try to avoid sharp jumps
+        distance = (max_val - min_val)*2 #we set the slope to 0.5 to try to avoid sharp jumps
         
         #####################################################################
         #Smooth corners to the interior of the image to minimize black space#
@@ -1459,8 +1459,8 @@ def find_peaks_ids(smooth_ddy, max_space, config):
     #as well as periodic slice points so that there are no sections longer#
     #than max_space                                                       #
     #######################################################################
-    pos_peaks, _ = sp.signal.find_peaks(smooth_ddy, height = config["straightening_threshold"], distance = config["points_per_image"])
-    neg_peaks, _ = sp.signal.find_peaks(-1*smooth_ddy, height = config["straightening_threshold"], distance = config["points_per_image"])
+    pos_peaks, _ = sp.signal.find_peaks(smooth_ddy, height = config["straightening_threshold"], distance = config["points_per_image"]//3)
+    neg_peaks, _ = sp.signal.find_peaks(-1*smooth_ddy, height = config["straightening_threshold"], distance = config["points_per_image"]//3)
     peak_idxs = np.concatenate((pos_peaks, neg_peaks))
     peak_idxs = np.sort(peak_idxs)
     #Add first and last spline point
@@ -1525,8 +1525,8 @@ def make_smooth_border_splines(thresh, corners, spline_pts, config):
     #Standardize heights by cropping to minimum height#
     ###################################################
     height = int(np.min(smooth_bottom_spline[:, 1] - smooth_top_spline[:, 1]))
-    top_contour_pts = mid_spline - np.array([0, height//2])
-    bottom_contour_pts = mid_spline + np.array([0, height//2])
+    smooth_top_spline = mid_spline - np.array([0, height//2])
+    smooth_bottom_spline = mid_spline + np.array([0, height//2])
     return smooth_top_spline, smooth_bottom_spline, mid_spline
 
 def divide_splines(top_spline, bottom_spline, mid_spline, spline_pts, max_space, config):
@@ -1563,17 +1563,18 @@ def divide_splines(top_spline, bottom_spline, mid_spline, spline_pts, max_space,
     #Return slice corners and widths as well as the final width and height to project into
     return corners, rectangular_width, rectangular_height, widths
 
-def make_batch_splines(thresh, t_start, t_stop, b_start, b_stop, spline_pts, config):
+def make_batch_splines(thresh, start, stop, spline_pts, config):
     ###################################
     #Get contour points for boundaries#
     ###################################
     top_contour_pts = []
-    bottom_contour_pts = []    
-    for x in range(t_start, t_stop):
+    bottom_contour_pts = []
+
+    for x in range(start, stop):
         pix = np.where(thresh[:, x] > 0)[0]
         if len(pix) > 0:
             top_contour_pts.append([x, np.min(pix)])
-    for x in range(b_start, b_stop):
+    for x in range(start, stop):
         pix = np.where(thresh[:, x] > 0)[0]
         if len(pix) > 0:
             bottom_contour_pts.append([x, np.max(pix)])
@@ -1602,10 +1603,10 @@ def anchor_edge_images(img, config):
     #First try to clean the edges of the batch so the anchor images "stand alone"#
     ##############################################################################
     thresh, t_start, t_stop, b_start, b_stop = mask_anchor_images(img, config)
-    start = min(t_start, b_start)
-    stop = max(t_stop, b_stop)
+    start = max(t_start, b_start)
+    stop = min(t_stop, b_stop)
     spline_pts = max(config["points_per_image"], int(config["points_per_image"]*((stop - start)/config["img_dims"][0])))
-    splines = make_batch_splines(thresh, t_start, t_stop, b_start, b_stop, spline_pts, config)
+    splines = make_batch_splines(thresh, start, stop, spline_pts, config)
     mid_spline, smooth_top_spline, smooth_bottom_spline = splines
     
     ########################################
@@ -1748,7 +1749,7 @@ def mask_anchor_images(img, config):
 def get_all_anchor_points(mid_spline, smooth_top_spline, smooth_bottom_spline, spline_pts, config):
     scaled_spline = (mid_spline[:, 1]/((mid_spline[-1, 0] - mid_spline[0, 0])/spline_pts))
     der2 = sp.signal.savgol_filter(scaled_spline, window_length = config["points_per_image"], polyorder=2, deriv=2, mode = "nearest")
-    peak_idxs = find_peaks_ids(der2, config["points_per_image"] * 5, config)
+    peak_idxs = find_peaks_ids(der2, config["points_per_image"] * 3, config)
     if 0 not in peak_idxs:
         peak_idxs = np.insert(peak_idxs, 0, [0])
     if len(mid_spline) - 1 not in peak_idxs:
@@ -2068,7 +2069,7 @@ def stitch_final_mosaic(config):
     #features in a search distance from the stitching ends.
     #Since subsequent panoramas overlap by one image, the relevant features should be within one
     #image width of the ends
-    search_distance = int(config["img_dims"][0] *1.0)
+    search_distance = int(config["img_dims"][0] *1.5)
     img_matches = match_batch_features(adjusted_imgs, search_distance, config)
     cv_features, matches, img_keypoints = build_panorama_opencv_objects(adjusted_imgs, img_matches)
     config["logger"].info("Stitching batches...")
@@ -2346,6 +2347,9 @@ def adjust_config(config, image_directory, parent_directory):
     ######################################################################
     #Configure logger and change level based on verbose setting in config#
     ######################################################################
+    #Suppress OpenCV warnings because Linux systems may get a persistent 
+    #warning when the cameras cannot be estimated
+    os.environ['OPENCV_LOG_LEVEL'] = 'OFF'
     log_path = os.path.join(config["final_mosaic_path"],  os.path.basename(os.path.normpath(config["image_directory"])) + '.log')
     #Make log if it doesn't exist
     if not os.path.exists(log_path):
