@@ -5,10 +5,12 @@ Created on Thu Dec 19 16:33:41 2024
 @author: Kaz Uyehara
 """
 import cv2
+import copy
 from lightglue import LightGlue, SuperPoint #git clone https://github.com/cvg/LightGlue.git && cd LightGlue
 from lightglue.utils import rbd
 import logging
 import itertools
+import multiprocessing
 import numpy as np
 import os
 import pandas as pd
@@ -116,127 +118,128 @@ def get_inliers(img_feats, img_paths, src_idx, dst_idx, config):
         if len(filtered_idx[0]) > 3:
             keypoint_prop_dict[keypoint_prop] = filtered_idx
             
-    ###########################
-    #Clean keypoint dictionary#
-    ###########################
-    #No need to retry with different keypoint_prop if it doesn't increase the number of inliers
-    #so remove keys where we do not gain inliers from previous keypoint prop
-    last_value = len(list(keypoint_prop_dict.items())[0][1][0])
-    clean_dict = {list(keypoint_prop_dict.items())[0][0]: list(keypoint_prop_dict.items())[0][1]}
-    for key, value in list(keypoint_prop_dict.items())[1:]:
-        if len(value[0]) > last_value:
-            clean_dict[key] = value
-            last_value = len(value[0])
-
-    ####################################################
-    #Filter based on keypoint distances from each other#
-    ####################################################
-    for keypoint_prop, filtered_idx in clean_dict.items():
-        #We want src points to be close to dst points in global space, so we exclude points that are
-        #on the wrong part of the image to try to get the minimal images necessary and keypoints that are
-        #unlikely to be present in more than two images.
-        m_kpts0_f = m_kpts0_np[filtered_idx]
-        m_kpts1_f = m_kpts1_np[filtered_idx]
-        
-        if len(m_kpts0_f) >= config["min_inliers"]:
-            #Changing the RANSAC threshold parameter will determine if we get more but noisier matches (higher value)
-            #or fewer but more pixel-perfect matches (lower value). Lower values help ensure that the OpenCV Matcher
-            #will also match the points.
-            transformation_matrix = None
-            config["logger"].debug("Found {} inliers with keypoint filter of {}".format(len(m_kpts0_f), keypoint_prop))
-                
-            ######################################################
-            #Filter based on RANSAC threshold and minimum inliers#
-            ###################################################### 
-            #Use lowest RANSAC threshold possible to meet minimum inliers
-            for RANSAC_threshold in range(1, int(config["max_RANSAC_thresh"]) + 1):
-                H, mask = cv2.findHomography(m_kpts0_f, m_kpts1_f, cv2.RANSAC, RANSAC_threshold)
-                if np.sum(mask) >= config["min_inliers"]:
-                    config["logger"].debug("Using RANSAC threshold of {} to get {} inliers".format(RANSAC_threshold, np.sum(mask)))
-                    transformation_matrix = H
-                    break
-                
-            ########################################
-            #Filter based on homography constraints#
-            ########################################
-            if transformation_matrix is not None:
-                stitch_movement = transformation_matrix[0, 2]
-                forward_vs_lateral = abs(transformation_matrix[0,2]/transformation_matrix[1,2] + 0.001)
-                scale = (transformation_matrix[0,0]**2 + transformation_matrix[1,0]**2)**0.5 #estimate scale factor
-                #We only want matches where the homography matrix indicates that there is positive movement in the
-                #stitching direction, there is more movement in the stitching direction that the normal, and that
-                #the distance of the camera from the plane is not changing too much. We also need sufficient points
-                #that match this homography or we risk the OpenCV Matcher failing to match the points.
-                if (((stitch_movement > 0) and forward_vs_lateral > config["xy_ratio"]) and 
-                    (abs(scale - 1.0) < config["scale_constraint"])):
-                    k0_idx = matches[:,0].cpu().numpy()[filtered_idx][mask.astype(bool).flatten()]
-                    k1_idx = matches[:,1].cpu().numpy()[filtered_idx][mask.astype(bool).flatten()]
-                    preselect_kp0, preselect_feat0 = kpts0[k0_idx].cpu().numpy(), feats0['descriptors'][k0_idx].cpu().numpy()
-                    preselect_kp1, preselect_feat1 = kpts1[k1_idx].cpu().numpy(), feats1['descriptors'][k1_idx].cpu().numpy()
-                    mean_error, _ = get_LMEDS_error(preselect_kp0, preselect_kp1, config)
-                    config["logger"].debug("Initial reprojection error of: {}".format(mean_error))
-
-                    ####################################################################################################
-                    #Filter out what we believe to be the most non-planar points so that we can optimize the homography#
-                    ####################################################################################################
-                    #Once we have excluded extreme outliers, try to find the best points to use to find the final homography matrix.
-                    #Since RANSAC can quickly exclude points but may not find an optimal solution, even when the RANSAC threshold is low,
-                    #we try to remove outliers using a brute force method.
-                    """TO DO: This brute force method can probably be further optimized, but the cv2 implementation is fast enough
-                    that it is not currently a problem"""
-                    idx = np.arange(len(preselect_kp0)) #use to keep track of the final indices to keep
-                    idx = idx[:, None] #make column vector
-                    idx_kp0 = np.hstack((idx, preselect_kp0)) #add idx to the keypoints
-                    idx_kp1 = np.hstack((idx, preselect_kp1))
-                    maximum_removals = int(len(preselect_kp0) - config["min_inliers"])
-                    error_array = full_outlier_function(preselect_kp0, preselect_kp1, maximum_removals, config)
-                    if len(error_array) > 0:
-                        best_idx = np.argmin(error_array[:,1])
-                        best_iterations = int(error_array[best_idx, 0]) #Find best number of points to remove to minimize mean error
-                        mean_error = error_array[best_idx, 1]
+    if len(keypoint_prop_dict) > 0:
+        ###########################
+        #Clean keypoint dictionary#
+        ###########################
+        #No need to retry with different keypoint_prop if it doesn't increase the number of inliers
+        #so remove keys where we do not gain inliers from previous keypoint prop
+        last_value = len(list(keypoint_prop_dict.items())[0][1][0])
+        clean_dict = {list(keypoint_prop_dict.items())[0][0]: list(keypoint_prop_dict.items())[0][1]}
+        for key, value in list(keypoint_prop_dict.items())[1:]:
+            if len(value[0]) > last_value:
+                clean_dict[key] = value
+                last_value = len(value[0])
+    
+        ####################################################
+        #Filter based on keypoint distances from each other#
+        ####################################################
+        for keypoint_prop, filtered_idx in clean_dict.items():
+            #We want src points to be close to dst points in global space, so we exclude points that are
+            #on the wrong part of the image to try to get the minimal images necessary and keypoints that are
+            #unlikely to be present in more than two images.
+            m_kpts0_f = m_kpts0_np[filtered_idx]
+            m_kpts1_f = m_kpts1_np[filtered_idx]
+            
+            if len(m_kpts0_f) >= config["min_inliers"]:
+                #Changing the RANSAC threshold parameter will determine if we get more but noisier matches (higher value)
+                #or fewer but more pixel-perfect matches (lower value). Lower values help ensure that the OpenCV Matcher
+                #will also match the points.
+                transformation_matrix = None
+                config["logger"].debug("Found {} inliers with keypoint filter of {}".format(len(m_kpts0_f), keypoint_prop))
+                    
+                ######################################################
+                #Filter based on RANSAC threshold and minimum inliers#
+                ###################################################### 
+                #Use lowest RANSAC threshold possible to meet minimum inliers
+                for RANSAC_threshold in range(1, int(config["max_RANSAC_thresh"]) + 1):
+                    H, mask = cv2.findHomography(m_kpts0_f, m_kpts1_f, cv2.RANSAC, RANSAC_threshold)
+                    if np.sum(mask) >= config["min_inliers"]:
+                        config["logger"].debug("Using RANSAC threshold of {} to get {} inliers".format(RANSAC_threshold, np.sum(mask)))
+                        transformation_matrix = H
+                        break
+                    
+                ########################################
+                #Filter based on homography constraints#
+                ########################################
+                if transformation_matrix is not None:
+                    stitch_movement = transformation_matrix[0, 2]
+                    forward_vs_lateral = abs(transformation_matrix[0,2]/transformation_matrix[1,2] + 0.001)
+                    scale = (transformation_matrix[0,0]**2 + transformation_matrix[1,0]**2)**0.5 #estimate scale factor
+                    #We only want matches where the homography matrix indicates that there is positive movement in the
+                    #stitching direction, there is more movement in the stitching direction that the normal, and that
+                    #the distance of the camera from the plane is not changing too much. We also need sufficient points
+                    #that match this homography or we risk the OpenCV Matcher failing to match the points.
+                    if (((stitch_movement > 0) and forward_vs_lateral > config["xy_ratio"]) and 
+                        (abs(scale - 1.0) < config["scale_constraint"])):
+                        k0_idx = matches[:,0].cpu().numpy()[filtered_idx][mask.astype(bool).flatten()]
+                        k1_idx = matches[:,1].cpu().numpy()[filtered_idx][mask.astype(bool).flatten()]
+                        preselect_kp0, preselect_feat0 = kpts0[k0_idx].cpu().numpy(), feats0['descriptors'][k0_idx].cpu().numpy()
+                        preselect_kp1, preselect_feat1 = kpts1[k1_idx].cpu().numpy(), feats1['descriptors'][k1_idx].cpu().numpy()
+                        mean_error, _ = get_LMEDS_error(preselect_kp0, preselect_kp1, config)
+                        config["logger"].debug("Initial reprojection error of: {}".format(mean_error))
+    
+                        ####################################################################################################
+                        #Filter out what we believe to be the most non-planar points so that we can optimize the homography#
+                        ####################################################################################################
+                        #Once we have excluded extreme outliers, try to find the best points to use to find the final homography matrix.
+                        #Since RANSAC can quickly exclude points but may not find an optimal solution, even when the RANSAC threshold is low,
+                        #we try to remove outliers using a brute force method.
+                        """TO DO: This brute force method can probably be further optimized, but the cv2 implementation is fast enough
+                        that it is not currently a problem"""
+                        idx = np.arange(len(preselect_kp0)) #use to keep track of the final indices to keep
+                        idx = idx[:, None] #make column vector
+                        idx_kp0 = np.hstack((idx, preselect_kp0)) #add idx to the keypoints
+                        idx_kp1 = np.hstack((idx, preselect_kp1))
+                        maximum_removals = int(len(preselect_kp0) - config["min_inliers"])
+                        error_array = full_outlier_function(preselect_kp0, preselect_kp1, maximum_removals, config)
+                        if len(error_array) > 0:
+                            best_idx = np.argmin(error_array[:,1])
+                            best_iterations = int(error_array[best_idx, 0]) #Find best number of points to remove to minimize mean error
+                            mean_error = error_array[best_idx, 1]
+                        else:
+                            best_iterations = 0
+                        #Recreate the outlier removal to recover the optimal set of points
+                        idx_to_keep = incremental_outlier_removal(idx_kp0, idx_kp1, best_iterations, config)
+                        preselect_kp0, preselect_feat0 = preselect_kp0[idx_to_keep], preselect_feat0[idx_to_keep]
+                        preselect_kp1, preselect_feat1 = preselect_kp1[idx_to_keep], preselect_feat1[idx_to_keep]
+    
+                        ####################################
+                        #Filter based on reprojection error#
+                        ####################################
+                        if mean_error <= config["max_reprojection_error"]:
+                            config["logger"].debug("{} inliers after filtering, for a final reprojection error of: {}".format(len(preselect_kp0), mean_error))
+                            return (img_feats, True, preselect_kp0, preselect_feat0, preselect_kp1, preselect_feat1, mean_error, RANSAC_threshold, keypoint_prop)
+                        else:
+                            config["logger"].debug("Minimum error of {} was above error threshold, consider adjusting max_reprojection_error".format(mean_error))
                     else:
-                        best_iterations = 0
-                    #Recreate the outlier removal to recover the optimal set of points
-                    idx_to_keep = incremental_outlier_removal(idx_kp0, idx_kp1, best_iterations, config)
-                    preselect_kp0, preselect_feat0 = preselect_kp0[idx_to_keep], preselect_feat0[idx_to_keep]
-                    preselect_kp1, preselect_feat1 = preselect_kp1[idx_to_keep], preselect_feat1[idx_to_keep]
-
-                    ####################################
-                    #Filter based on reprojection error#
-                    ####################################
-                    if mean_error <= config["max_reprojection_error"]:
-                        config["logger"].debug("{} inliers after filtering, for a final reprojection error of: {}".format(len(preselect_kp0), mean_error))
-                        return (img_feats, True, preselect_kp0, preselect_feat0, preselect_kp1, preselect_feat1, mean_error, RANSAC_threshold, keypoint_prop)
-                    else:
-                        config["logger"].debug("Minimum error of {} was above error threshold, consider adjusting max_reprojection_error".format(mean_error))
+                        if stitch_movement <= 0:
+                            config["logger"].debug("Rejecting match because camera not moving forward")
+                        if forward_vs_lateral < config["xy_ratio"]:
+                            config["logger"].debug("Low movement ratio of {} in the non-stitching direction, consider adjusting xy_ratio".format(forward_vs_lateral))
+                        if abs(scale - 1.0) > config["scale_constraint"]:
+                            config["logger"].debug("Scale difference between images is too high at {} consider adjusting scale_constraint".format(abs(scale - 1.0)))
                 else:
-                    if stitch_movement <= 0:
-                        config["logger"].debug("Rejecting match because camera not moving forward")
-                    if forward_vs_lateral < config["xy_ratio"]:
-                        config["logger"].debug("Low movement ratio of {} in the non-stitching direction, consider adjusting xy_ratio".format(forward_vs_lateral))
-                    if abs(scale - 1.0) > config["scale_constraint"]:
-                        config["logger"].debug("Scale difference between images is too high at {} consider adjusting scale_constraint".format(abs(scale - 1.0)))
+                    config["logger"].debug("Could not find sufficient RANSAC inliers, consider increasing max_RANSAC_thresh")
             else:
-                config["logger"].debug("Could not find sufficient RANSAC inliers, consider increasing max_RANSAC_thresh")
+                config["logger"].debug("Only found {} inliers with keypoint filter of {} consider increasing min_inliers".format(len(m_kpts0_f), keypoint_prop))
+    
+        ########################################################################
+        #Force to match with image if this is there are no more images to check#
+        ########################################################################
+        if dst_idx - src_idx == 1:
+            config["logger"].warning("Cannot find good matches, so forced to match image {} and {}, consider increasing max_reprojection error".format(src_idx, dst_idx))
+            #If the filters exclude the match, pass the original match points in the most generous
+            #RANSAC inliers and features as a last resort
+            H, default_mask = cv2.findHomography(m_kpts0_np, m_kpts1_np, cv2.RANSAC, config["max_RANSAC_thresh"])
+            k0_idx = matches[:,0].cpu().numpy()[default_mask.astype(bool).flatten()]
+            k1_idx = matches[:,1].cpu().numpy()[default_mask.astype(bool).flatten()]
+            preselect_kp0, preselect_feat0 = kpts0[k0_idx].cpu().numpy(), feats0['descriptors'][k0_idx].cpu().numpy()
+            preselect_kp1, preselect_feat1 = kpts1[k1_idx].cpu().numpy(), feats1['descriptors'][k1_idx].cpu().numpy()
+            mean_error, _ = get_LMEDS_error(preselect_kp0, preselect_kp1, config)
+            return (img_feats, True, preselect_kp0, preselect_feat0, preselect_kp1, preselect_feat1, mean_error, None, 1.0)
         else:
-            config["logger"].debug("Only found {} inliers with keypoint filter of {} consider increasing min_inliers".format(len(m_kpts0_f), keypoint_prop))
-
-    ########################################################################
-    #Force to match with image if this is there are no more images to check#
-    ########################################################################
-    if dst_idx - src_idx == 1:
-        config["logger"].warning("Cannot find good matches, so forced to match image {} and {}".format(src_idx, dst_idx))
-        #If the filters exclude the match, pass the original match points in the most generous
-        #RANSAC inliers and features as a last resort
-        H, default_mask = cv2.findHomography(m_kpts0_np, m_kpts1_np, cv2.RANSAC, config["max_RANSAC_thresh"])
-        k0_idx = matches[:,0].cpu().numpy()[default_mask.astype(bool).flatten()]
-        k1_idx = matches[:,1].cpu().numpy()[default_mask.astype(bool).flatten()]
-        preselect_kp0, preselect_feat0 = kpts0[k0_idx].cpu().numpy(), feats0['descriptors'][k0_idx].cpu().numpy()
-        preselect_kp1, preselect_feat1 = kpts1[k1_idx].cpu().numpy(), feats1['descriptors'][k1_idx].cpu().numpy()
-        mean_error, _ = get_LMEDS_error(preselect_kp0, preselect_kp1, config)
-        return (img_feats, True, preselect_kp0, preselect_feat0, preselect_kp1, preselect_feat1, mean_error, None, 1.0)
-    else:
-        return (img_feats, False, None, None, None, None, None, None, 1.0)
+            return (img_feats, False, None, None, None, None, None, None, 1.0)
 
 def incremental_outlier_removal(pt0, pt1, iterations, config):
     ###################################################################
@@ -2102,57 +2105,58 @@ def stitch_final_mosaic(config):
         shutil.rmtree(config["output_path"])
     config["logger"].info("Done")
     
-def run_batches(config):
-    ####################################
-    #Prepare directory to store outputs#
-    ####################################
-    if not os.path.exists(config["output_path"]):
-        config["logger"].info("Creating {}".format(config["output_path"]))
-        os.makedirs(config["output_path"])
-    else:
-        config["logger"].info("Deleting existing contents in {}".format(config["output_path"]))
-        for root, dirs, files in os.walk(config["output_path"], topdown=False):
-            for name in files:
-                os.remove(os.path.join(root, name))
-            for name in dirs:
-                os.rmdir(os.path.join(root, name))
-                
+def run_batches(base_config, image_directory, parent_directory):
     ##############################################################
     #Working in batches of images, first construct mini panoramas#
     ##############################################################
-    start_idx = 0 #The image to start stitching
-    finished = False #True when you stitch the final image in the directory
-    final_img_count = 0
-    batch_keys = [] #Stores the img idx of the final image used in the batch
-    while not finished:
-        #Create panoramas by first stitching batches of images
-        #and starting a new stitch from the last image of the previous
-        #panorama, leaving one image of overlap between each subsequent panorama
-        finished, start_idx, img_count = run_stitching_pipeline(start_idx, config)
-        final_img_count += img_count - 1
-        batch_keys.append(start_idx)
-    final_img_count += 1
-    config["logger"].info("Used {} of initial images in final mosaic".format(final_img_count))
-    
-    ######################################################################
-    #If all panorama batches were successful, attempt to stitch them into#
-    #the final super panorama.                                           #
-    ######################################################################
-    output_filename = 'batch_' + os.path.basename(os.path.normpath(config["image_directory"])) + '.png'
-    #Retrieve the batches of panoramas that were created
-    batch_paths = [os.path.join(config["output_path"], str(i) + "_" + output_filename) for i in batch_keys]
-    if len(batch_paths) > 1:
-        #If there is more than one panorama, stitch the panoramas together
-        stitch_final_mosaic(config)
-    else:
-        #Otherwise, save the single panorama
-        final_mosaic = cv2.imread(batch_paths[0])
-        config["registration"] = config["registration"][start_idx]
-        save_final_mosaic(final_mosaic, config)
-        if not config["save_output"]:
-            config["logger"].info('Deleting intermediate images...')
-            shutil.rmtree(config["output_path"])
-        config["logger"].info("Done")
+    start_time = time.perf_counter()
+    config = adjust_config(base_config, image_directory, parent_directory)
+    config["logger"].info("Starting {} ".format(image_directory))
+    try:
+        start_idx = 0 #The image to start stitching
+        finished = False #True when you stitch the final image in the directory
+        final_img_count = 0
+        batch_keys = [] #Stores the img idx of the final image used in the batch
+        while not finished:
+            #Create panoramas by first stitching batches of images
+            #and starting a new stitch from the last image of the previous
+            #panorama, leaving one image of overlap between each subsequent panorama
+            finished, start_idx, img_count = run_stitching_pipeline(start_idx, config)
+            final_img_count += img_count - 1
+            batch_keys.append(start_idx)
+        final_img_count += 1
+        config["logger"].info("Used {} of initial images in final mosaic".format(final_img_count))
+        
+        ######################################################################
+        #If all panorama batches were successful, attempt to stitch them into#
+        #the final super panorama.                                           #
+        ######################################################################
+        output_filename = 'batch_' + os.path.basename(os.path.normpath(config["image_directory"])) + '.png'
+        #Retrieve the batches of panoramas that were created
+        batch_paths = [os.path.join(config["output_path"], str(i) + "_" + output_filename) for i in batch_keys]
+        if len(batch_paths) > 1:
+            #If there is more than one panorama, stitch the panoramas together
+            stitch_final_mosaic(config)
+        else:
+            #Otherwise, save the single panorama
+            final_mosaic = cv2.imread(batch_paths[0])
+            config["registration"] = config["registration"][start_idx]
+            save_final_mosaic(final_mosaic, config)
+            if not config["save_output"]:
+                config["logger"].info('Deleting intermediate images...')
+                shutil.rmtree(config["output_path"])
+            config["logger"].info("Done")
+            
+        end_time = time.perf_counter()
+        elapsed_time = (end_time - start_time)/60
+        config["logger"].info("Total elapsed time: {:.2f} minutes".format(elapsed_time))
+        return True
+    except ValueError as e:
+        config["logger"].error("Error {} caused failure for panorama {}".format(e, image_directory))      
+        return False
+    except KeyboardInterrupt:
+        config["logger"].error("Keyboard interrupt for panorama {}".format(image_directory))  
+        return False
 
 def save_final_mosaic(mosaic, config):
     ############
@@ -2277,7 +2281,7 @@ def load_config(config_path):
     type_dict = {"image_directory": (str, None),
                  "parent_directory": (str, None),
                  "save_output": (bool, None),
-                 "device": (str, ["cuda", "cpu", "mps"]),
+                 "device": (str, ["cuda", "cpu", "mps", "multiprocessing"]),
                  "batch_size": (int, None),
                  "final_resolution": ((int, float),  None),
                  "seam_resolution": (float,  None),
@@ -2318,16 +2322,14 @@ def load_config(config_path):
             if not all(isinstance(item, secondary) for item in value):
                 safe = False
                 raise TypeError("{} has incorrect type. Expected a list of {}".format(key, secondary))
-                
-    # Adjust device setting based on the string from config
-    config["device"] = torch.device(config["device"] if torch.cuda.is_available() and config["device"] == "cuda" else "cpu")
     return safe, config
 
-def adjust_config(config, image_directory, parent_directory):
+def adjust_config(base_config, image_directory, parent_directory):
     #########################################################
     #Add information to the config to provide flexibility   #
     #for running on a single directory or all subdirectories#
     #########################################################
+    config = copy.deepcopy(base_config)
     config["image_directory"] = image_directory
     
     #################################################
@@ -2337,24 +2339,17 @@ def adjust_config(config, image_directory, parent_directory):
     config["output_path"] =  os.path.join(parent_directory, output_dir)
     config["final_mosaic_path"] = os.path.join(parent_directory, "final_mosaics")
     config["final_mosaic_name"] = "mosaic_" + os.path.basename(os.path.normpath(config["image_directory"])) + '.png'
-
-    ##############################
-    #Check that write path exists#
-    ##############################
     if not os.path.exists(config["final_mosaic_path"]):
         os.makedirs(config["final_mosaic_path"])
 
     ######################################################################
     #Configure logger and change level based on verbose setting in config#
     ######################################################################
-    #Suppress OpenCV warnings because Linux systems may get a persistent 
-    #warning when the cameras cannot be estimated
-    os.environ['OPENCV_LOG_LEVEL'] = 'OFF'
     log_path = os.path.join(config["final_mosaic_path"],  os.path.basename(os.path.normpath(config["image_directory"])) + '.log')
     #Make log if it doesn't exist
     if not os.path.exists(log_path):
         open(log_path, 'a').close()
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(os.path.basename(image_directory))
     logger.setLevel(logging.DEBUG)  
     logger.propagate = False
     stream_handler = logging.StreamHandler()
@@ -2365,8 +2360,8 @@ def adjust_config(config, image_directory, parent_directory):
     else:
         stream_handler.setLevel(logging.WARNING)
         file_handler.setLevel(logging.INFO)
-    log_format =  logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    stream_format = logging.Formatter('%(message)s')
+    log_format =  logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    stream_format = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
     stream_handler.setFormatter(stream_format)
     file_handler.setFormatter(log_format)
     logger.addHandler(stream_handler)
@@ -2381,7 +2376,12 @@ def adjust_config(config, image_directory, parent_directory):
     dummy_img = read_image(image_paths[0], config)
     img_xdim, img_ydim = dummy_img.shape[1], dummy_img.shape[0]
     config["img_dims"] = (img_xdim, img_ydim)
-
+    
+    ##################################################
+    #Set device after checking if GPU is cuda enabled#
+    ##################################################
+    config["device"] = torch.device(config["device"] if torch.cuda.is_available() and config["device"] == "cuda" else "cpu")
+    
     ##########################################
     #Create dictionary for pixel registration#
     ##########################################
@@ -2393,40 +2393,90 @@ def adjust_config(config, image_directory, parent_directory):
         gps_data["y"] = np.zeros((len(gps_data)))
         config["logger"].info("Found GPS data...")
         config["GPS_data"] = gps_data
-    config["logger"].info("Configuration loaded successfully...")
-    
-    ####################################################################################
-    #Disable OpenCL because it has memory limits that will interfere with large mosaics#
-    ####################################################################################
-    config["logger"].info('Disabling OpenCL to try to avoid memory issues')
-    cv2.ocl.setUseOpenCL(False)
+
+    ####################################
+    #Prepare directory to store outputs#
+    ####################################
+    if not os.path.exists(config["output_path"]):
+        config["logger"].info("Creating {}".format(config["output_path"]))
+        os.makedirs(config["output_path"])
+    else:
+        config["logger"].info("Deleting existing contents in {}".format(config["output_path"]))
+        for root, dirs, files in os.walk(config["output_path"], topdown=False):
+            for name in files:
+                os.remove(os.path.join(root, name))
+            for name in dirs:
+                os.rmdir(os.path.join(root, name))
     return config
 
-def run(config_path):
+def run(config_path, cpu_count):
+    ###################
+    #Check config file#
+    # #################
+    start_time = time.perf_counter()
     safe, base_config = load_config(config_path)
     if not safe:
         return
-    start_time = time.perf_counter()
+    
+    ###############################
+    #Disable OpenCL and OpenCV Log#
+    ###############################
+    print('Disabling OpenCL to try to avoid memory issues and suppressing OpenCV log')
+    cv2.ocl.setUseOpenCL(False)
+    #Suppress OpenCV warnings because Linux systems may get a persistent 
+    #warning when the cameras cannot be estimated
+    os.environ['OPENCV_LOG_LEVEL'] = 'OFF'
+    
     if "image_directory" in base_config:
         parent_directory = os.path.dirname(os.path.normpath(base_config["image_directory"]))
-        config = adjust_config(base_config, base_config["image_directory"], parent_directory)
-        run_batches(config)
+        run_batches(base_config, base_config["image_directory"], parent_directory)
+        
+    ########################################################
+    #Run across all directories if given a parent directory#
+    ########################################################
     elif "parent_directory" in base_config:
         subfolders = [ f.path for f in os.scandir(base_config["parent_directory"]) if f.is_dir()]
         print("Found ", len(subfolders), " subdirectories to process...")
         parent_directory = os.path.dirname(os.path.normpath(base_config["parent_directory"]))
-        for image_directory in subfolders:
-            config = adjust_config(base_config, image_directory, parent_directory)
-            try:
-                run_batches(config)
-            except ValueError as e:
-                config["logger"].error("Error {} caused failure for panorama {}".format(e, image_directory))                
+        
+        ####################################################################
+        #If multiprocessing was chosen, distirbute directories across CPUs#
+        ###################################################################
+        if base_config["device"] == "multiprocessing":
+            if cpu_count == 0:
+                cpu_count = multiprocessing.cpu_count()
+            
+            ###############################################
+            #Create unique config files for each directory#
+            ###############################################
+            num_processes = min(cpu_count, len(subfolders))
+            print("Proceeding with {} processes".format(num_processes))
+            with multiprocessing.Pool(processes = num_processes) as pool:
+                try:
+                    results = pool.starmap(run_batches, zip(itertools.repeat(base_config), subfolders, itertools.repeat(parent_directory)))
+                except KeyboardInterrupt:
+                    print("Stopping processes")
+                    pool.terminate()
+        ###########################################
+        #Run each directory in series, can use GPU#
+        ###########################################
+        else:
+            for image_directory in subfolders:
+                run_batches(base_config, image_directory, parent_directory)      
     else:
         print("Specify either image_directory or parent_directory")
+        
+    ##########################
+    #Print total elapsed time#
+    ##########################
     end_time = time.perf_counter()
     elapsed_time = (end_time - start_time)/60
-    config["logger"].info("Elapsed time: {:.2f} minutes".format(elapsed_time))
+    print("Total elapsed time: {:.2f} minutes".format(elapsed_time))
     
 if __name__ == "__main__":
     config_path = sys.argv[1]
-    run(config_path)
+    if len(sys.argv) > 2:
+        cpu_count = int(sys.argv[2])
+    else:
+        cpu_count = 0
+    run(config_path, cpu_count)
