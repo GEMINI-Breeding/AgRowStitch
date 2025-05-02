@@ -2450,7 +2450,10 @@ def run(config_path, cpu_count):
         ###################################################################
         if base_config["device"] == "multiprocessing":
             if cpu_count == 0:
-                cpu_count = multiprocessing.cpu_count() - 1
+                cpu_count = int(multiprocessing.cpu_count() - 1)
+                if cpu_count < 2:
+                    print("Insufficient CPUs to run in parallel")
+                    return
             
             ###############################################
             #Create unique config files for each directory#
