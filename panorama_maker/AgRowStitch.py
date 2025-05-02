@@ -2450,7 +2450,7 @@ def run(config_path, cpu_count):
         ###################################################################
         if base_config["device"] == "multiprocessing":
             if cpu_count == 0:
-                cpu_count = multiprocessing.cpu_count()
+                cpu_count = multiprocessing.cpu_count() - 1
             
             ###############################################
             #Create unique config files for each directory#
