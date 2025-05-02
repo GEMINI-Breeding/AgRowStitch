@@ -509,6 +509,9 @@ def spherical_camera_estimation(features, matches, config):
     #Estimate camera rotations and focal length (can change across cameras),  #
     #with principalx and principaly constant across cameras and no translation#
     ###########################################################################
+    
+    #On Linux systems we get a persistent warning when the cameras cannot be estimated because of a nan or inf:
+    #DLASCLS parameter number 4 had an illegal value on Linux systems
     estimator = cv2.detail_HomographyBasedEstimator()
     success, cameras = estimator.apply(features, matches, None)
     if not success:
@@ -2349,7 +2352,7 @@ def adjust_config(base_config, image_directory, parent_directory):
     #Make log if it doesn't exist
     if not os.path.exists(log_path):
         open(log_path, 'a').close()
-    logger = logging.getLogger(os.path.basename(image_directory))
+    logger = logging.getLogger(os.path.basename(os.path.normpath(config["image_directory"])))
     logger.setLevel(logging.DEBUG)  
     logger.propagate = False
     stream_handler = logging.StreamHandler()
@@ -2416,18 +2419,19 @@ def run(config_path, cpu_count):
     start_time = time.perf_counter()
     safe, base_config = load_config(config_path)
     if not safe:
+        print("Config file is not valid")
         return
     
     ###############################
     #Disable OpenCL and OpenCV Log#
     ###############################
-    print('Disabling OpenCL to try to avoid memory issues and suppressing OpenCV log')
+    print('Disabling OpenCL to try to avoid memory issues')
     cv2.ocl.setUseOpenCL(False)
-    #Suppress OpenCV warnings because Linux systems may get a persistent 
-    #warning when the cameras cannot be estimated
-    os.environ['OPENCV_LOG_LEVEL'] = 'OFF'
-    
+
     if "image_directory" in base_config:
+        if not os.path.exists(base_config["image_directory"]):
+            print("Image directory: {} does not exist".format(base_config["image_directory"]))
+            return
         parent_directory = os.path.dirname(os.path.normpath(base_config["image_directory"]))
         run_batches(base_config, base_config["image_directory"], parent_directory)
         
@@ -2435,12 +2439,14 @@ def run(config_path, cpu_count):
     #Run across all directories if given a parent directory#
     ########################################################
     elif "parent_directory" in base_config:
+        if not os.path.exists(base_config["parent_directory"]):
+            print("Parent directory: {} does not exist".format(base_config["parent_directory"]))
+            return
         subfolders = [ f.path for f in os.scandir(base_config["parent_directory"]) if f.is_dir()]
         print("Found ", len(subfolders), " subdirectories to process...")
         parent_directory = os.path.dirname(os.path.normpath(base_config["parent_directory"]))
         
         ####################################################################
-        #If multiprocessing was chosen, distirbute directories across CPUs#
         ###################################################################
         if base_config["device"] == "multiprocessing":
             if cpu_count == 0:
