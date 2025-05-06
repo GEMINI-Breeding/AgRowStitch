@@ -426,34 +426,23 @@ def OpenCV_match(cv_features, match_threshold, match_confidence):
     return matches
 
 def prepare_OpenCV_objects(start_idx, config):
-    #####################
-    #Read in image paths#
-    #####################
-    path = config["image_directory"]
-    image_types = ('.png', '.jpg', 'jpeg', '.tiff', 'tif', '.gif', '.img')
-    image_paths = [os.path.join(path, img_name) for img_name in os.listdir(path) if img_name.endswith(image_types)]
-    image_paths = sorted_nicely(image_paths)
-    if start_idx == 0:
-        config["logger"].info("Found {} images".format(len(image_paths)))
-        
     ###############################################################################
     #Get the features for the best subset of images using SuperPoint and LightGlue#
     ###############################################################################
-    cv_features, subset_indices, img_matches, filtered = subset_images(image_paths, start_idx, config)
+    cv_features, subset_indices, img_matches, filtered = subset_images(config["image_paths"], start_idx, config)
     matches = OpenCV_match(cv_features, 3.0, 0.1)
 
     #######################################################################
     #Make list of the subset of images used and resize to final resolution#
     #######################################################################
-    images = [read_image(image_paths[i], config) for i in subset_indices]
-    image_names =  [img_name for img_name in os.listdir(path) if img_name.endswith(image_types)]
-    subset_image_names = [image_names[i] for i in subset_indices]
+    images = [read_image(config["image_paths"][i], config) for i in subset_indices]
+    subset_image_names = [config["image_names"][i] for i in subset_indices]
     
     ########################################################################################
     #Make a dictionary with the src and dst keypoints and features for the subset of images#
     ########################################################################################
     subset_img_keypoints = {i: img_matches[k]['keypoints'] for i, k in enumerate(subset_indices)}
-    if subset_indices[-1] >= len(image_paths) - 1:
+    if subset_indices[-1] >= len(config["image_paths"]) - 1:
         finished = True
     else:
         finished = False
@@ -992,11 +981,13 @@ def retry_panorama(start_idx, filtered, config):
             try:
                 new_panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
                 if not check_panorama(new_panorama, config):
-                    config["logger"].warning("Spherical stitching was unreliable, retrying with partial affine... consider reducing forward_limit or batch_size")
+                    config["logger"].warning(
+                        "Spherical stitching was unreliable for batch {},retrying with partial affine... consider reducing forward_limit or batch_size".format(idx))
                     new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
             except ValueError as e:
                 config["logger"].warning(e)
-                config["logger"].warning("Spherical stitching failed, retrying with partial affine... consider reducing forward_limit or batch_size")
+                config["logger"].warning(
+                    "Spherical stitching failed for batch {}, retrying with partial affine... consider reducing forward_limit or batch_size".format(idx))
                 new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
         else:
             new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
@@ -1025,11 +1016,13 @@ def retry_panorama(start_idx, filtered, config):
             try:
                 new_panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
                 if not check_panorama(new_panorama, config):
-                    config["logger"].warning("Spherical stitching was unreliable, retrying with partial affine... consider reducing forward_limit or batch_size")
+                    config["logger"].warning(
+                        "Spherical stitching was unreliable for batch {},retrying with partial affine... consider reducing forward_limit or batch_size".format(idx))
                     new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
             except ValueError as e:
                 config["logger"].warning(e)
-                config["logger"].warning("Spherical stitching failed, retrying with partial affine... consider reducing forward_limit or batch_size")
+                config["logger"].warning(
+                    "Spherical stitching failed for batch {}, retrying with partial affine... consider reducing forward_limit or batch_size".format(idx))
                 new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
         else:
             new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
@@ -1055,7 +1048,7 @@ def retry_panorama(start_idx, filtered, config):
     if check_panorama(new_panorama, config):
         return new_panorama, idx, finished, len(images)
     else:
-        config["logger"].warning("Trying to proceed with a distorted panorama...")
+        config["logger"].warning("Trying to proceed with a distorted mosaic for batch {}...".format(idx))
         return new_panorama, idx, finished, len(images)
 
 def run_stitching_pipeline(start_idx, config):
@@ -1076,13 +1069,15 @@ def run_stitching_pipeline(start_idx, config):
             panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
             #If the panorama seems incorrect, use the same keypoints and try with a partial affine projection
             if not check_panorama(panorama, config):
-                config["logger"].warning("Spherical stitching was unreliable, retrying with partial affine... consider reducing forward_limit or batch_size")
+                config["logger"].warning(
+                    "Spherical stitching was unreliable for batch {},retrying with partial affine... consider reducing forward_limit or batch_size".format(idx))
                 config["camera"] = "partial affine"
                 panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
                 config["camera"] = "spherical"
         except ValueError as e: #If bundle adjustment fails, fall back on a partial affine stitch with same keypoints instead
             config["logger"].warning(e)
-            config["logger"].warning("Spherical stitching failed, retrying with partial affine... consider reducing forward_limit or batch_size")
+            config["logger"].warning(
+                "Spherical stitching failed for batch {}, retrying with partial affine... consider reducing forward_limit or batch_size".format(idx))
             config["camera"] = "partial affine"
             panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
             config["camera"] = "spherical"
@@ -2112,6 +2107,7 @@ def run_batches(base_config, image_directory, parent_directory):
     ##############################################################
     #Working in batches of images, first construct mini panoramas#
     ##############################################################
+    cv2.ocl.setUseOpenCL(False)
     start_time = time.perf_counter()
     config = adjust_config(base_config, image_directory, parent_directory)
     config["logger"].info("Starting {} ".format(image_directory))
@@ -2334,7 +2330,7 @@ def adjust_config(base_config, image_directory, parent_directory):
     #########################################################
     config = copy.deepcopy(base_config)
     config["image_directory"] = image_directory
-    
+
     #################################################
     #Specify paths for intermediate and final output#
     #################################################
@@ -2371,12 +2367,23 @@ def adjust_config(base_config, image_directory, parent_directory):
     logger.addHandler(file_handler)
     config["logger"] = logger
     
+    ###########################
+    #Get image paths and names#
+    ###########################
+    image_types = ('.png', '.PNG', '.jpg', '.JPG', '.jpeg', '.JPEG', '.tiff', 'tif', '.TIFF', '.TIF', '.gif', '.GIF', '.img', '.IMG')
+    image_paths = [os.path.join(config["image_directory"], img_name)
+                   for img_name in os.listdir(config["image_directory"])
+                   if img_name.endswith(image_types)]
+    config["image_paths"] = sorted_nicely(image_paths)
+    config["logger"].info("Found {} images".format(len(image_paths)))
+    if len(config["image_paths"]) < 2:
+        raise ValueError("Insufficient images for stitching")
+    config["image_names"] =  [os.path.basename(img_name) for img_name in config["image_paths"]]
+    
     #############################################################
     #Recover the original image dimensions used for the panorama#
     #############################################################
-    dummy_path = config["image_directory"]
-    image_paths = [os.path.join(dummy_path, img_name) for img_name in os.listdir(dummy_path)]
-    dummy_img = read_image(image_paths[0], config)
+    dummy_img = read_image(config["image_paths"][0], config)
     img_xdim, img_ydim = dummy_img.shape[1], dummy_img.shape[0]
     config["img_dims"] = (img_xdim, img_ydim)
     
@@ -2422,12 +2429,9 @@ def run(config_path, cpu_count):
         print("Config file is not valid")
         return
     
-    ###############################
-    #Disable OpenCL and OpenCV Log#
-    ###############################
-    print('Disabling OpenCL to try to avoid memory issues')
-    cv2.ocl.setUseOpenCL(False)
-
+    ##################################
+    #For a single directory of images#
+    ##################################
     if "image_directory" in base_config:
         if not os.path.exists(base_config["image_directory"]):
             print("Image directory: {} does not exist".format(base_config["image_directory"]))
@@ -2446,15 +2450,16 @@ def run(config_path, cpu_count):
         print("Found ", len(subfolders), " subdirectories to process...")
         parent_directory = os.path.dirname(os.path.normpath(base_config["parent_directory"]))
         
-        ####################################################################
-        ###################################################################
+        ###########################
+        #Run in parallel with CPUs#
+        ###########################
         if base_config["device"] == "multiprocessing":
             if cpu_count == 0:
                 cpu_count = int(multiprocessing.cpu_count() - 1)
                 if cpu_count < 2:
                     print("Insufficient CPUs to run in parallel")
                     return
-            
+                
             ###############################################
             #Create unique config files for each directory#
             ###############################################
@@ -2466,6 +2471,7 @@ def run(config_path, cpu_count):
                 except KeyboardInterrupt:
                     print("Stopping processes")
                     pool.terminate()
+                    
         ###########################################
         #Run each directory in series, can use GPU#
         ###########################################
