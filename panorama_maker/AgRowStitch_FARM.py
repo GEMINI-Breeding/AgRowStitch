@@ -2106,14 +2106,14 @@ def stitch_final_mosaic(config):
         shutil.rmtree(config["output_path"])
     config["logger"].info("Done")
     
-def run_batches(base_config, image_directory, write_directory, gps_path, min_lat, max_lat, min_lon, max_lon):
+def run_batches(base_config, image_directory, write_directory, gps_path, min_lat, max_lat, min_lon, max_lon, heading):
     ##############################################################
     #Working in batches of images, first construct mini panoramas#
     ##############################################################
     cv2.ocl.setUseOpenCL(False)
     start_time = time.perf_counter()
     config = adjust_config(base_config, image_directory, write_directory, gps_path,
-                           min_lat, max_lat, min_lon, max_lon)
+                           min_lat, max_lat, min_lon, max_lon, heading)
     config["logger"].info("Starting {} ".format(image_directory))
     try:
         start_idx = 0 #The image to start stitching
@@ -2395,7 +2395,7 @@ def load_config(config_path):
                 raise TypeError("{} has incorrect type. Expected a list of {}".format(key, secondary))
     return safe, config
 
-def adjust_config(base_config, image_directory, write_directory, gps_path, min_lat, max_lat, min_lon, max_lon):
+def adjust_config(base_config, image_directory, write_directory, gps_path, min_lat, max_lat, min_lon, max_lon, heading):
     #########################################################
     #Add information to the config to provide flexibility   #
     #for running on a single directory or all subdirectories#
@@ -2461,19 +2461,48 @@ def adjust_config(base_config, image_directory, write_directory, gps_path, min_l
         config["logger"].info("Found GPS data...")
         subset_gps = gps_data.loc[(((gps_data["lon_interp"] <= max_lon) & (gps_data["lon_interp"] >= min_lon)) & 
                                    ((gps_data["lat_interp"] <= max_lat) & (gps_data["lat_interp"] >= min_lat)))]
+        ####################
+        #T4 is moving North#
+        ####################
+        if subset_gps.iloc[0]["lat_interp"] < subset_gps.iloc[-1]["lat_interp"]:
+            if heading == "North":
+                config["logger"].info("Inferring stitching direction as UP")
+                config["stitching_direction"] = "UP"
+            else:
+                config["logger"].info("Inferring stitching direction as DOWN")
+                config["stitching_direction"] = "DOWN"
+                
+        ####################
+        #T4 is moving South#
+        ####################
+        else:
+            if heading == "North":
+                config["logger"].info("Inferring stitching direction as DOWN")
+                config["stitching_direction"] = "DOWN"
+            else:
+                config["logger"].info("Inferring stitching direction as UP")
+                config["stitching_direction"] = "UP"
+        
+        ############################
+        #Make image paths and names#
+        ############################
         short_image_names = [int(name.split("-")[1].split(".")[0]) for name in image_names]
         images_to_keep = np.intersect1d(short_image_names, subset_gps["time"].values)
         long_image_names = ["camA-" + str(img) + ".jpg" for img in images_to_keep]
         image_paths = [os.path.join(config["image_directory"], img_name)
                        for img_name in long_image_names]
         config["GPS_data"] = subset_gps
-        
-    config["image_paths"] = sorted_nicely(image_paths)
-    if len(config["image_paths"]) < 2:
-        raise ValueError("Insufficient images for stitching")
+        config["image_paths"] = sorted_nicely(image_paths)
+        if len(config["image_paths"]) < 2:
+            raise ValueError("Insufficient images for stitching")
+    else:
+        config["image_paths"] = sorted_nicely(image_paths)
+        if len(config["image_paths"]) < 2:
+            raise ValueError("Insufficient images for stitching")
+        config["stitching_direction"] = get_direction(config["image_paths"], config)
+    
     config["image_names"] =  [os.path.basename(img_name) for img_name in config["image_paths"]]
     config["logger"].info("Using {} images".format(len(config["image_paths"])))
-    config["stitching_direction"] = get_direction(config["image_paths"], config)
     
     #############################################################
     #Recover the original image dimensions used for the panorama#
@@ -2532,7 +2561,17 @@ if __name__ == "__main__":
     directory_info = directory_info.dropna()
     parent_folders = [pathlib.Path(folder) for folder in directory_info["dir"].values]
     image_folders = [os.path.join(directory, "camA") for directory in parent_folders] 
-    gps_path = [os.path.join(directory, "gps_interp.csv") for directory in parent_folders] 
+    gps_path = [os.path.join(directory, "gps_interp.csv") for directory in parent_folders]
+    heading_path = [os.path.join(directory, "msgs_synced.csv") for directory in parent_folders]
+    headings = []
+    for file in heading_path:
+        df = pd.read_csv(file)
+        h = np.unique(df["direction"])
+        if len(h) > 1:
+            raise ValueError("Headings are not consistent in file {}".format(file))
+        else:
+            headings.append(h[0])
+        
     min_lats = directory_info["min_lat"].values
     max_lats = directory_info["max_lat"].values
     min_lons = directory_info["min_lon"].values
@@ -2553,7 +2592,7 @@ if __name__ == "__main__":
         try:
             results = pool.starmap(run_batches, zip(itertools.repeat(base_config), image_folders,
                                                     itertools.repeat(args.write_path), gps_path,
-                                                    min_lats, max_lats, min_lons, max_lons))
+                                                    min_lats, max_lats, min_lons, max_lons, headings))
         except KeyboardInterrupt:
             print("Stopping processes")
             pool.terminate()
