@@ -949,12 +949,12 @@ def check_panorama(panorama, config):
         return True
     else:
         if len(contours) > 1.0:
-            config["logger"].debug("Panorama is not continuous!")
+            config["logger"].info("Panorama is not continuous!")
         if dim_ratio > 1.5:
-            config["logger"].debug("Dimensions of panorama are concerning")
+            config["logger"].info("Dimensions of panorama are concerning")
         #1:1.5 ratio threshold for lengths to check for distortion
         if rhombus < 0.67:
-            config["logger"].debug("Panorama seems distorted")
+            config["logger"].info("Panorama seems distorted")
         return False
 
 def retry_panorama(start_idx, filtered, config):
@@ -968,7 +968,7 @@ def retry_panorama(start_idx, filtered, config):
         #imposed on the homography could not be met, so we try to relax #
         #those constraints to maintain some filter on the points        #
         #################################################################
-        config["logger"].debug("Retrying with relaxed error and inlier constraints...")
+        config["logger"].info("Retrying with relaxed error and inlier constraints...")
         config["max_reprojection_error"] *= 1.2
         config["min_inliers"] *= 0.8
         config["max_RANSAC_thresh"] *= 1.2
@@ -977,7 +977,7 @@ def retry_panorama(start_idx, filtered, config):
         images, cv_features, matches, keypoint_dict, idx, filtered, finished, subset_image_names = prepare_OpenCV_objects(start_idx, config)
         
         #If a spherical stitch is not possible, try with a partial affine stitch instead
-        if config["camera"] == "spherical" and ((idx - start_idx) > (config["batch_size"] - 2) and not finished):
+        if config["camera"] == "spherical":
             try:
                 new_panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
                 if not check_panorama(new_panorama, config):
@@ -1004,7 +1004,7 @@ def retry_panorama(start_idx, filtered, config):
         #so we tighten the constraints to try to remove outliers that could cause#
         #a stitching failure                                                     #
         ##########################################################################
-        config["logger"].warning("Panorama is unreliable, retrying with stronger error and inlier constraints...")
+        config["logger"].info("Panorama is unreliable, retrying with stronger error and inlier constraints...")
         config["max_reprojection_error"] *= 0.8
         config["min_inliers"] *= 1.2
         config["max_RANSAC_thresh"] *= 0.8
@@ -1012,12 +1012,12 @@ def retry_panorama(start_idx, filtered, config):
         config["xy_ratio"] *= 1.2
         images, cv_features, matches, keypoint_dict, idx, filtered, finished, subset_image_names = prepare_OpenCV_objects(start_idx, config)
         #If a spherical stitch is not possible, try with a partial affine stitch instead
-        if config["camera"] == "spherical" and ((idx - start_idx) > (config["batch_size"] - 2) and not finished):
+        if config["camera"] == "spherical":
             try:
                 new_panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
                 if not check_panorama(new_panorama, config):
                     config["logger"].warning(
-                        "Spherical stitching was unreliable for batch {},retrying with partial affine... consider reducing forward_limit or batch_size".format(idx))
+                        "Spherical stitching was unreliable for batch {}, retrying with partial affine... consider reducing forward_limit or batch_size".format(idx))
                     new_panorama, corners, sizes = affine_OpenCV_pipeline(images, keypoint_dict, False, config)
             except ValueError as e:
                 config["logger"].warning(e)
@@ -1064,7 +1064,7 @@ def run_stitching_pipeline(start_idx, config):
     #Spherical projection works best because of robust bundle adjustment and wave correction#
     #########################################################################################
     #Default to affine if there were no good matches
-    if (config["camera"] == "spherical") and not finished:
+    if (config["camera"] == "spherical"):
         try: #Since bundle adjustment can fail, we use a try/except statement
             panorama, corners, sizes = spherical_OpenCV_pipeline(images, cv_features, matches, config)
             #If the panorama seems incorrect, use the same keypoints and try with a partial affine projection
@@ -1102,8 +1102,8 @@ def run_stitching_pipeline(start_idx, config):
         config["registration"][idx] = batch_dict
         image_range = idx - start_idx + 1
         images_used = len(images)
-        config["logger"].debug("Used {} images of the initial {}".format(images_used, image_range))
-        config["logger"].debug("Saving image {}".format(idx))
+        config["logger"].info("Used {} images of the initial {}".format(images_used, image_range))
+        config["logger"].info("Saving image {}".format(idx))
         cv2.imwrite(os.path.join(config["output_path"], str(idx) + "_"  + output_filename), panorama)
         return finished, idx, images_used
     else:
@@ -1114,8 +1114,8 @@ def run_stitching_pipeline(start_idx, config):
         new_panorama, new_idx, new_finished, images_used = retry_panorama(start_idx, filtered, config)
         #Use new panorama
         image_range = new_idx - start_idx + 1
-        config["logger"].debug("Used {} images of the initial {}".format(images_used, image_range))
-        config["logger"].debug("Saving image {}".format(idx))
+        config["logger"].info("Used {} images of the initial {}".format(images_used, image_range))
+        config["logger"].info("Saving image {}".format(idx))
         cv2.imwrite(os.path.join(config["output_path"], str(new_idx) + "_"  + output_filename), new_panorama)
         return new_finished, new_idx, images_used
 

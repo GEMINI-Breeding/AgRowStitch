@@ -1,13 +1,13 @@
 ################
 #Basic Settings#
 ################
-image_directory: "D:\\Tests\\T4_GPS\\camA"
-stitching_direction: "UP" #("LEFT", "RIGHT", "UP", "DOWN") #LEFT for Monopod and Amiga, UP for T4
-mask: [640, 640, 0, 0] #Pixels to remove from original image edges [left edge, right edge, top edge, bottom edge]
+image_directory: D:\\Tests\\Low_Drone\\
+stitching_direction: "RIGHT" #("LEFT", "RIGHT", "UP", "DOWN") #LEFT for Monopod and Amiga, UP for T4
+mask: [0, 0, 0, 0] #Pixels to remove from original image edges [left edge, right edge, top edge, bottom edge]
 #Monopod: [0, 0, 0, 0]; Amiga: [0, 0, 420, 0]; T4: [640, 640, 0, 0]
-forward_limit: 3 #integer, should be adjusted based on overlap between subsequent images, 5 for Monopod, 4 for Amiga and 3 for T4
-max_reprojection_error: 1.0 # float, 0.25-5.0 is recommended, should go up with higher resolution images, 3 for Monopod, 0.5, 1.0 for Amiga and T4
-device: "cuda"  #Use "cuda" for GPU, "cpu" for single processor or "multiprocessing" for parallel CPUs, specify CPU count as second argument
+forward_limit: 1 #integer, should be adjusted based on overlap between subsequent images, 5 for Monopod, 4 for Amiga and 3 for T4
+max_reprojection_error: 3.0 # float, 1.0-5.0 is recommended, should go up with higher resolution images, 3 for Monopod, 0.5, 1.0 for Amiga and T4
+device: "multiprocessing"  #Use "cuda" for GPU, "cpu" for single processor or "multiprocessing" for parallel CPUs, specify CPU count as second argument
 
 ###############
 #Save Settings#
@@ -43,7 +43,7 @@ straightening_threshold: 0.0001 #float, threshold in slope change that triggers 
 #If there is GPS information linked to each image, there should be a "gps.csv" file in the image_directory
 #with columns "image", "latitude", and "longitude". An output file will be written in the final output path
 #with columns "image", "latitude", "longitude", "x", and "y", where (0,0) is the top left corner and x is the horizontal
-GPS: True #True or False
+GPS: False #True or False
 #Change the orientation of final panorama before saving, if False camera movement will be right to left (stitching edge left)
 #"COMPASS" for NSEW orientation on screen if GPS is True, which will assume beds are aligned with one cardinal direction
 change_orientation: False #False, "90CW", "90CCW", "180" for clockwise, counterclockwise, or reverse direction --  or "COMPASS" for North is up
