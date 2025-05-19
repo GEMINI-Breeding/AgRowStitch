@@ -7,7 +7,7 @@ mask: [0, 0, 0, 0] #Pixels to remove from original image edges [left edge, right
 #Monopod: [0, 0, 0, 0]; Amiga: [0, 0, 420, 0]; T4: [640, 640, 0, 0]
 forward_limit: 1 #integer, should be adjusted based on overlap between subsequent images, 5 for Monopod, 4 for Amiga and 3 for T4
 max_reprojection_error: 3.0 # float, 1.0-5.0 is recommended, should go up with higher resolution images, 3 for Monopod, 0.5, 1.0 for Amiga and T4
-device: "multiprocessing"  #Use "cuda" for GPU, "cpu" for single processor or "multiprocessing" for parallel CPUs, specify CPU count as second argument
+device: "cuda"  #Use "cuda" for GPU, "cpu" for single processor or "multiprocessing" for parallel CPUs, specify CPU count as second argument
 
 ###############
 #Save Settings#

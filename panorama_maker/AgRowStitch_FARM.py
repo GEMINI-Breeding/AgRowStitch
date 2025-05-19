@@ -2106,14 +2106,17 @@ def stitch_final_mosaic(config):
         shutil.rmtree(config["output_path"])
     config["logger"].info("Done")
     
-def run_batches(base_config, image_directory, write_directory, gps_path, min_lat, max_lat, min_lon, max_lon, heading):
+def run_batches(base_config, image_directory, write_directory,
+                gps_path, min_lat, max_lat, min_lon, max_lon, heading, gpu_list):
     ##############################################################
     #Working in batches of images, first construct mini panoramas#
     ##############################################################
     cv2.ocl.setUseOpenCL(False)
     start_time = time.perf_counter()
+    worker_id = multiprocessing.current_process()._identity[0] - 1
+    my_gpu = gpu_list[(worker_id % len(gpu_list))]
     config = adjust_config(base_config, image_directory, write_directory, gps_path,
-                           min_lat, max_lat, min_lon, max_lon, heading)
+                           min_lat, max_lat, min_lon, max_lon, heading, my_gpu)
     config["logger"].info("Starting {} ".format(image_directory))
     try:
         start_idx = 0 #The image to start stitching
@@ -2353,7 +2356,7 @@ def load_config(config_path):
         config = yaml.safe_load(file)
 
     type_dict = {"save_output": (bool, None),
-                 "device": (str, ["cuda", "cpu", "mps", "multiprocessing"]),
+                 "device": (str, ["cuda", "cpu", "multiprocessing", "multigpu"]),
                  "batch_size": (int, None),
                  "final_resolution": ((int, float),  None),
                  "seam_resolution": (float,  None),
@@ -2395,7 +2398,7 @@ def load_config(config_path):
                 raise TypeError("{} has incorrect type. Expected a list of {}".format(key, secondary))
     return safe, config
 
-def adjust_config(base_config, image_directory, write_directory, gps_path, min_lat, max_lat, min_lon, max_lon, heading):
+def adjust_config(base_config, image_directory, write_directory, gps_path, min_lat, max_lat, min_lon, max_lon, heading, gpu):
     #########################################################
     #Add information to the config to provide flexibility   #
     #for running on a single directory or all subdirectories#
@@ -2407,12 +2410,11 @@ def adjust_config(base_config, image_directory, write_directory, gps_path, min_l
     #Specify paths for intermediate and final output#
     #################################################
     name = os.path.basename(os.path.normpath(os.path.dirname(config["image_directory"])))
-    output_dir = name + '_output'
-    config["output_path"] =  os.path.join(write_directory, output_dir)
-    config["final_mosaic_path"] = os.path.join(write_directory, "final_mosaics")
+    my_directory = os.path.join(write_directory, name)
+    if not os.path.exists(my_directory):
+        os.makedirs(my_directory)
+    config["final_mosaic_path"] = my_directory
     config["final_mosaic_name"] = "mosaic_" + name + '-camA.png'
-    if not os.path.exists(config["final_mosaic_path"]):
-        os.makedirs(config["final_mosaic_path"])
 
     ######################################################################
     #Configure logger and change level based on verbose setting in config#
@@ -2514,11 +2516,16 @@ def adjust_config(base_config, image_directory, write_directory, gps_path, min_l
     ##################################################
     #Set device after checking if GPU is cuda enabled#
     ##################################################
-    config["device"] = torch.device(config["device"] if torch.cuda.is_available() and config["device"] == "cuda" else "cpu")
+    if gpu is not None:
+        config["device"] = torch.device(gpu)
+    else:
+        config["device"] = torch.device("cpu")
     
     ####################################
     #Prepare directory to store outputs#
     ####################################
+    output_dir = name + '_output'
+    config["output_path"] =  os.path.join(config["final_mosaic_path"], output_dir)
     if not os.path.exists(config["output_path"]):
         config["logger"].info("Creating {}".format(config["output_path"]))
         os.makedirs(config["output_path"])
@@ -2550,7 +2557,8 @@ if __name__ == "__main__":
     parser.add_argument("image_info", type = lambda f: check_file(f, ".csv"), help = "absolute path to .csv file with image directories and information")
     parser.add_argument("config_file", type = lambda f: check_file(f, ".yaml"), help = "absolute path to .yaml file with config information")
     parser.add_argument("write_path", type = pathlib.Path, help="absolute path to directory where temporary and final output should be written")
-    parser.add_argument("cpus", type = int, help="number of CPUs available")
+    parser.add_argument("cpus", type = int, help="number of CPUs to use")
+    parser.add_argument("gpus", type = int, help="number of GPUs to use")
     args = parser.parse_args()
     
     ##############################################
@@ -2560,7 +2568,7 @@ if __name__ == "__main__":
     directory_info = pd.read_csv(args.image_info)
     directory_info = directory_info.dropna()
     parent_folders = [pathlib.Path(folder) for folder in directory_info["dir"].values]
-    image_folders = [os.path.join(directory, "camA") for directory in parent_folders] 
+    image_folders = [os.path.join(directory, "camA") for directory in parent_folders]
     gps_path = [os.path.join(directory, "gps_interp.csv") for directory in parent_folders]
     heading_path = [os.path.join(directory, "msgs_synced.csv") for directory in parent_folders]
     headings = []
@@ -2585,14 +2593,45 @@ if __name__ == "__main__":
     if not safe:
         print("Config file is not valid")
 
+    #########################
+    #Set number of processes#
+    #########################
+    #Save number of tasks to give each process a unique ID for assigning GPUs
+    num_tasks = len(image_folders)
+    task_ids = np.arange(num_tasks)
+    
+    if base_config["device"] == "multiprocessing":
+        num_processes = args.cpus
+        gpus = num_processes * [None]
+    elif base_config["device"] == "cuda" or base_config["device"] == "multgpu":
+        if torch.cuda.is_available():
+            num_gpus = torch.cuda.device_count()
+            if base_config["device"] == "multgpu":
+                num_processes = min(args.cpus, args.gpus)
+                gpus = ["cuda:" + str(i) for i in range(num_processes)]
+            else:
+                num_processes = 1
+                gpus = ["cuda:0"]
+        else:
+            print("CUDA not available, using single CPU instead")
+            base_config["device"] = "cpu"
+            num_processes = 1
+            gpus = [None]
+    else:
+        num_processes = 1
+        gpus = [None]
+    print("Starting {} processes based on cpu and gpu settings".format(num_processes))
+    
     ###############################################
     #Create unique config files for each directory#
     ###############################################
-    with multiprocessing.Pool(processes = args.cpus) as pool:
+
+    with multiprocessing.Pool(processes = num_processes) as pool:
         try:
-            results = pool.starmap(run_batches, zip(itertools.repeat(base_config), image_folders,
-                                                    itertools.repeat(args.write_path), gps_path,
-                                                    min_lats, max_lats, min_lons, max_lons, headings))
+            results = pool.starmap(run_batches, zip(itertools.repeat(base_config, num_tasks), image_folders,
+                                                    itertools.repeat(args.write_path, num_tasks), gps_path,
+                                                    min_lats, max_lats, min_lons, max_lons, headings,
+                                                    itertools.repeat(gpus, num_tasks)))
         except KeyboardInterrupt:
             print("Stopping processes")
             pool.terminate()
