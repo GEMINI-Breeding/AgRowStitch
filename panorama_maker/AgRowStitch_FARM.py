@@ -2606,12 +2606,20 @@ if __name__ == "__main__":
     elif base_config["device"] == "cuda" or base_config["device"] == "multgpu":
         if torch.cuda.is_available():
             num_gpus = torch.cuda.device_count()
-            if base_config["device"] == "multgpu":
+            if num_gpus >= 1:
+                if args.gpus > num_gpus:
+                    print("Could not find {} GPUs, only found {}".format(args.gpus, num_gpus))
                 num_processes = min(args.cpus, args.gpus)
-                gpus = ["cuda:" + str(i) for i in range(num_processes)]
+                if base_config["device"] == "multgpu":
+                    gpus = ["cuda:" + str(i) for i in range(num_processes)]
+                else:
+                    num_processes = 1
+                    gpus = ["cuda:0"]
             else:
+                print("Did not specify at least one GPU, using single CPU instead")
+                base_config["device"] = "cpu"
                 num_processes = 1
-                gpus = ["cuda:0"]
+                gpus = [None]
         else:
             print("CUDA not available, using single CPU instead")
             base_config["device"] = "cpu"
