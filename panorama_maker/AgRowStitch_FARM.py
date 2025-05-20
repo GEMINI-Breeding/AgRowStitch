@@ -243,6 +243,9 @@ def get_inliers(img_feats, img_paths, src_idx, dst_idx, config):
             return (img_feats, True, preselect_kp0, preselect_feat0, preselect_kp1, preselect_feat1, mean_error, None, 1.0)
         else:
             return (img_feats, False, None, None, None, None, None, None, 1.0)
+    else:
+        config["logger"].debug("Could not find any matches, consider decreasing forward_limit")
+        return (img_feats, False, None, None, None, None, None, None, 1.0)
 
 def incremental_outlier_removal(pt0, pt1, iterations, config):
     ###################################################################
