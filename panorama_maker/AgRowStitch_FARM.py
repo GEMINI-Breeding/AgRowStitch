@@ -414,7 +414,7 @@ def OpenCV_match(cv_features, match_threshold, match_confidence):
             #apply2 finds all pairwise matches and is accelerated by TBB, but we can beat that performance
             #serially by simply skipping most pairs
             match = matcher.apply(cv_features[i], cv_features[j])
-            if match.confidence < 0.1:
+            if match.confidence <= 0.1:
                 #matches_confidece_thresh (sic) is the threshold over which a match is 
                 #considered a match, default is 3.0. In source if match confidence is > thresh, confidence is set to zero,
                 #where confidence is inliers / (8 + 0.3 * matches). This is meant to reject images that are too similar.
@@ -2118,54 +2118,59 @@ def run_batches(base_config, image_directory, write_directory,
     start_time = time.perf_counter()
     worker_id = multiprocessing.current_process()._identity[0] - 1
     my_gpu = gpu_list[(worker_id % len(gpu_list))]
-    config = adjust_config(base_config, image_directory, write_directory, gps_path,
+    config, exists = adjust_config(base_config, image_directory, write_directory, gps_path,
                            min_lat, max_lat, min_lon, max_lon, heading, my_gpu)
-    config["logger"].info("Starting {} ".format(image_directory))
-    try:
-        start_idx = 0 #The image to start stitching
-        finished = False #True when you stitch the final image in the directory
-        final_img_count = 0
-        batch_keys = [] #Stores the img idx of the final image used in the batch
-        while not finished:
-            #Create panoramas by first stitching batches of images
-            #and starting a new stitch from the last image of the previous
-            #panorama, leaving one image of overlap between each subsequent panorama
-            finished, start_idx, img_count = run_stitching_pipeline(start_idx, config)
-            final_img_count += img_count - 1
-            batch_keys.append(start_idx)
-        final_img_count += 1
-        config["logger"].info("Used {} of initial images in final mosaic".format(final_img_count))
-        
-        ######################################################################
-        #If all panorama batches were successful, attempt to stitch them into#
-        #the final super panorama.                                           #
-        ######################################################################
-        output_filename = 'batch_' + os.path.basename(os.path.normpath(config["image_directory"])) + '.png'
-        #Retrieve the batches of panoramas that were created
-        batch_paths = [os.path.join(config["output_path"], str(i) + "_" + output_filename) for i in batch_keys]
-        if len(batch_paths) > 1:
-            #If there is more than one panorama, stitch the panoramas together
-            stitch_final_mosaic(config)
-        else:
-            #Otherwise, save the single panorama
-            final_mosaic = cv2.imread(batch_paths[0])
-            config["registration"] = config["registration"][start_idx]
-            save_final_mosaic(final_mosaic, config)
-            if not config["save_output"]:
-                config["logger"].info('Deleting intermediate images...')
-                shutil.rmtree(config["output_path"])
-            config["logger"].info("Done")
-            
-        end_time = time.perf_counter()
-        elapsed_time = (end_time - start_time)/60
-        config["logger"].info("Total elapsed time: {:.2f} minutes".format(elapsed_time))
+    if exists:
+        print("Skipping {} because it already exists".format(image_directory))
         return True
-    except ValueError as e:
-        config["logger"].error("Error {} caused failure for panorama {}".format(e, image_directory))      
-        return False
-    except KeyboardInterrupt:
-        config["logger"].error("Keyboard interrupt for panorama {}".format(image_directory))  
-        return False
+    
+    else:
+        config["logger"].info("Starting {} ".format(image_directory))
+        try:
+            start_idx = 0 #The image to start stitching
+            finished = False #True when you stitch the final image in the directory
+            final_img_count = 0
+            batch_keys = [] #Stores the img idx of the final image used in the batch
+            while not finished:
+                #Create panoramas by first stitching batches of images
+                #and starting a new stitch from the last image of the previous
+                #panorama, leaving one image of overlap between each subsequent panorama
+                finished, start_idx, img_count = run_stitching_pipeline(start_idx, config)
+                final_img_count += img_count - 1
+                batch_keys.append(start_idx)
+            final_img_count += 1
+            config["logger"].info("Used {} of initial images in final mosaic".format(final_img_count))
+            
+            ######################################################################
+            #If all panorama batches were successful, attempt to stitch them into#
+            #the final super panorama.                                           #
+            ######################################################################
+            output_filename = 'batch_' + os.path.basename(os.path.normpath(config["image_directory"])) + '.png'
+            #Retrieve the batches of panoramas that were created
+            batch_paths = [os.path.join(config["output_path"], str(i) + "_" + output_filename) for i in batch_keys]
+            if len(batch_paths) > 1:
+                #If there is more than one panorama, stitch the panoramas together
+                stitch_final_mosaic(config)
+            else:
+                #Otherwise, save the single panorama
+                final_mosaic = cv2.imread(batch_paths[0])
+                config["registration"] = config["registration"][start_idx]
+                save_final_mosaic(final_mosaic, config)
+                if not config["save_output"]:
+                    config["logger"].info('Deleting intermediate images...')
+                    shutil.rmtree(config["output_path"])
+                config["logger"].info("Done")
+                
+            end_time = time.perf_counter()
+            elapsed_time = (end_time - start_time)/60
+            config["logger"].info("Total elapsed time: {:.2f} minutes".format(elapsed_time))
+            return True
+        except ValueError as e:
+            config["logger"].error("Error {} caused failure for panorama {}".format(e, image_directory))      
+            return False
+        except KeyboardInterrupt:
+            config["logger"].error("Keyboard interrupt for panorama {}".format(image_directory))  
+            return False
 
 def save_final_mosaic(mosaic, config):
     ############
@@ -2416,6 +2421,8 @@ def adjust_config(base_config, image_directory, write_directory, gps_path, min_l
     my_directory = os.path.join(write_directory, name)
     if not os.path.exists(my_directory):
         os.makedirs(my_directory)
+    else:
+        return config, True
     config["final_mosaic_path"] = my_directory
     config["final_mosaic_name"] = "mosaic_" + name + '-camA.png'
 
@@ -2539,7 +2546,7 @@ def adjust_config(base_config, image_directory, write_directory, gps_path, min_l
                 os.remove(os.path.join(root, name))
             for name in dirs:
                 os.rmdir(os.path.join(root, name))
-    return config
+    return config, False
 
 def check_file(file, extension):
     if file.endswith(extension):
@@ -2636,7 +2643,7 @@ if __name__ == "__main__":
     ###############################################
     #Create unique config files for each directory#
     ###############################################
-
+    multiprocessing.set_start_method('spawn') #Since we check number of devices before starting the processes, this is not fork safe
     with multiprocessing.Pool(processes = num_processes) as pool:
         try:
             results = pool.starmap(run_batches, zip(itertools.repeat(base_config, num_tasks), image_folders,

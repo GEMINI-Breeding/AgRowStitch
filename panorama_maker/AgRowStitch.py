@@ -411,7 +411,7 @@ def OpenCV_match(cv_features, match_threshold, match_confidence):
             #apply2 finds all pairwise matches and is accelerated by TBB, but we can beat that performance
             #serially by simply skipping most pairs
             match = matcher.apply(cv_features[i], cv_features[j])
-            if match.confidence < 0.1:
+            if match.confidence <= 0.1:
                 #matches_confidece_thresh (sic) is the threshold over which a match is 
                 #considered a match, default is 3.0. In source if match confidence is > thresh, confidence is set to zero,
                 #where confidence is inliers / (8 + 0.3 * matches). This is meant to reject images that are too similar.
