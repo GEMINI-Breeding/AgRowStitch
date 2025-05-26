@@ -1,7 +1,7 @@
 ################
 #Basic Settings#
 ################
-parent_directory: D:\\Analysis\\Open_Flower_Model\\Peak_Plus
+parent_directory: D:\\Analysis\\Open_Flower_Model\\to_process\\August_Dates
 stitching_direction: "LEFT" #("LEFT", "RIGHT", "UP", "DOWN") #LEFT for Monopod and Amiga, UP for T4
 mask: [0, 0, 0, 0] #Pixels to remove from original image edges [left edge, right edge, top edge, bottom edge]
 #Monopod: [0, 0, 0, 0]; Amiga: [0, 0, 420, 0]; T4: [640, 640, 0, 0]

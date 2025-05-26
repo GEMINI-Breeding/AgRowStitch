@@ -377,7 +377,7 @@ def subset_images(image_paths, start_idx, config):
     cv_features = build_feature_objects(subset_image_paths, img_matches, subset_indices, config)
     return cv_features, subset_indices, img_matches, filtered
 
-def OpenCV_match(cv_features, match_threshold, match_confidence):
+def OpenCV_match(cv_features, config):
     ############################
     #Calculate pairwise matches#
     ############################
@@ -407,11 +407,12 @@ def OpenCV_match(cv_features, match_threshold, match_confidence):
             #If confident in the matches, set match_conf low to avoid excluding true matches, default is 0.3.
             matcher = cv2.detail.BestOf2NearestMatcher(try_use_gpu = False, match_conf = 0.1,
                                                          num_matches_thresh1 = 6, num_matches_thresh2 = 6,
-                                                           matches_confindece_thresh = match_threshold)
+                                                           matches_confindece_thresh = 3.0)
             #apply2 finds all pairwise matches and is accelerated by TBB, but we can beat that performance
             #serially by simply skipping most pairs
             match = matcher.apply(cv_features[i], cv_features[j])
             if match.confidence <= 0.1:
+                config["logger"].debug("Match {} and {} in this batch were too similar, changing to affine matcher".format(i, j))
                 #matches_confidece_thresh (sic) is the threshold over which a match is 
                 #considered a match, default is 3.0. In source if match confidence is > thresh, confidence is set to zero,
                 #where confidence is inliers / (8 + 0.3 * matches). This is meant to reject images that are too similar.
@@ -422,8 +423,6 @@ def OpenCV_match(cv_features, match_threshold, match_confidence):
                 matcher = cv2.detail_AffineBestOf2NearestMatcher(try_use_gpu = False, match_conf = 0.1,
                                                              num_matches_thresh1 = 6)
                 match = matcher.apply(cv_features[i], cv_features[j])
-                if match.confidence < 0.1:
-                    raise ValueError("Could not connect all images! Images might be too similar?")
             match.src_img_idx, match.dst_img_idx = i, j
         matches.append(match)
     return matches
@@ -433,7 +432,7 @@ def prepare_OpenCV_objects(start_idx, config):
     #Get the features for the best subset of images using SuperPoint and LightGlue#
     ###############################################################################
     cv_features, subset_indices, img_matches, filtered = subset_images(config["image_paths"], start_idx, config)
-    matches = OpenCV_match(cv_features, 3.0, 0.1)
+    matches = OpenCV_match(cv_features, config)
 
     #######################################################################
     #Make list of the subset of images used and resize to final resolution#
