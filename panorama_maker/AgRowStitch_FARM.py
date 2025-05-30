@@ -924,20 +924,25 @@ def check_panorama(panorama, config):
     #The corners of the panorama should make the shape of a rectangle
     #If the vertical edges are much different in length, there was some distortion
     #when making planar, so check if the corners form a rhombus
-    (top_left, top_right, bottom_right, bottom_left) = find_pano_corners(thresh, True, config)
-    top_length = top_right[0] - top_left[0]
-    bottom_length = bottom_right[0] - bottom_left[0]
-    left_height = bottom_left[1] - top_left[1]
-    right_height = bottom_right[1] - top_right[1]
-    if top_length <= bottom_length:
-        top_rhombus = top_length/bottom_length
-    else:
-        top_rhombus = bottom_length/top_length
-    if left_height <= right_height:
-        side_rhombus = left_height/right_height
-    else:
-        side_rhombus = right_height/left_height
-    rhombus = min(top_rhombus, side_rhombus)
+    try:
+        (top_left, top_right, bottom_right, bottom_left) = find_pano_corners(thresh, config)
+        top_length = top_right[0] - top_left[0]
+        bottom_length = bottom_right[0] - bottom_left[0]
+        left_height = bottom_left[1] - top_left[1]
+        right_height = bottom_right[1] - top_right[1]
+        if top_length <= bottom_length:
+            top_rhombus = top_length/bottom_length
+        else:
+            top_rhombus = bottom_length/top_length
+        if left_height <= right_height:
+            side_rhombus = left_height/right_height
+        else:
+            side_rhombus = right_height/left_height
+        rhombus = min(top_rhombus, side_rhombus)
+    except Exception as e:
+        config["logger"].warning(e)
+        config["logger"].warning("Could not find corners of batch")
+        rhombus = 0.0
         
     ############################
     #Check if panorama has gaps#
@@ -1120,7 +1125,7 @@ def run_stitching_pipeline(start_idx, config):
         #Use new panorama
         image_range = new_idx - start_idx + 1
         config["logger"].info("Used {} images of the initial {}".format(images_used, image_range))
-        config["logger"].info("Saving image {}".format(idx))
+        config["logger"].info("Saving image {}".format(new_idx))
         cv2.imwrite(os.path.join(config["output_path"], str(new_idx) + "_"  + output_filename), new_panorama)
         return new_finished, new_idx, images_used
 
@@ -1272,38 +1277,129 @@ def build_panorama_opencv_objects(images, img_matches):
     img_keypoints = {i: img_matches[i]['keypoints'] for i in range(len(images))}
     return cv_features, matches, img_keypoints
 
-def find_pano_corners(thresh, check, config):
+def find_pano_corners(thresh, config):
     #######################################################################
     #To find the corners of the panorama, we find the convex hull points  #
     #of the thresholded image that are closest to the corners of the image#
     #######################################################################
-    closest_corners = []
-    contours, h = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnt_pts = contours[0].reshape(contours[0].shape[0], contours[0].shape[2])
-    hull = cv2.convexHull(cnt_pts)
-    hull_pts = hull.reshape(hull.shape[0], hull.shape[2])
-    hull_pts = np.array(hull_pts, dtype = np.int64) #Convert to int64 to handle large numbers
+    #Find corners of thresholded image
     ymax, xmax = thresh.shape
     top_left = [0, 0]
     top_right = [xmax, 0]
     bottom_left = [0, ymax]
     bottom_right = [xmax, ymax]
-    all_corners = (top_left, top_right, bottom_right, bottom_left)
-    for img_corner in all_corners:
-        closest = np.sqrt(((hull_pts - img_corner)**2).sum(axis = 1))
-        closest_corners.append(hull_pts[np.argmin(closest)])
-    closest_corners = np.array(closest_corners, dtype = int)
+    #Min and max distance between corners on the same side 
+    distance_min, distance_max = config["img_dims"][1] * 0.5, config["img_dims"][1] * 1.5
     
-    #################################
-    #Check if corners are reasonable#
-    #################################
-    #When finding the corners of each panorama, we use the height of the original images to help 
-    #rule out edges that are too short, here we assume that the corners should be longer than half the
-    #original image height
-    min_length = config["img_dims"][1]*0.5
-    if check:
-        if closest_corners [3][1] - closest_corners[0][1] < min_length or closest_corners[2][1] -  closest_corners[1][1] < min_length:
-            raise ValueError("Panorama corners were estimated poorly or the panorama is distorted")
+    #################################################################################
+    #Get convex hull points of threshold image, this should include the true corners#
+    #################################################################################
+    contours, h = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnt_pts = contours[0].reshape(contours[0].shape[0], contours[0].shape[2])
+    hull = cv2.convexHull(cnt_pts)
+    hull_pts = hull.reshape(hull.shape[0], hull.shape[2])
+    hull_pts = np.array(hull_pts, dtype = np.int64) #Convert to int64 to handle large numbers
+    if len(hull_pts) < 4:
+        raise ValueError("Panorama corners were estimated poorly because there were insufficient convex hull points")
+    amin, amax = np.min(hull_pts[:, 0]), np.max(hull_pts[:, 0])
+
+    ##############################################################################
+    #The lowest and highest x values should be corners, but we need to break ties#
+    ##############################################################################
+    hmin_idxs = np.where(hull_pts[:, 0] == amin)[0]
+    if len(hmin_idxs) == 1:
+        hmin = hull_pts[hmin_idxs]
+    else:
+        ########################################################################
+        #Find the point with the lowest x that also is closest to a left corner#
+        ########################################################################
+        hmins = hull_pts[hmin_idxs]
+        distances = [min(((pt - top_left)**2).sum(axis = 0), ((pt - bottom_left)**2).sum(axis = 0)) for pt in hmins]
+        hmin = hmins[np.argmin(distances)]
+    if len(hmin) != 2:
+        raise ValueError("Panorama corners were estimated poorly because corner had wrong dimensions")
+        
+    ###############################################################
+    #Get slope and distance between hmin and all other hull points#
+    ###############################################################
+    hmin_vectors = np.array([[abs((pt[1] - hmin[1])/(pt[0] - hmin[0] + 0.1)),
+                              ((pt[1] - hmin[1])**2 + (pt[0] - hmin[0])**2)**0.5,
+                              pt[0], pt[1]] for pt in hull_pts])
+    
+    ############################################################################
+    #First filter out any points that are too close or too far to be considered#
+    ############################################################################
+    hmin_distance_filtered = hmin_vectors[np.where((hmin_vectors[:, 1] > distance_min) & (hmin_vectors[:, 1] < distance_max))[0]]
+    if len(hmin_distance_filtered) == 0:
+        raise ValueError("Panorama corners were estimated poorly because the identified corners were too close or too far")
+        
+    ###########################################################
+    #Round the slopes so that small differences are minimized #
+    #then of the points with the highest slope, choose the one#
+    #that is furthest from hmin                               #
+    ###########################################################
+    hmin_distance_filtered[:, 0] = hmin_distance_filtered[:, 0]//(1 + (np.max(hmin_distance_filtered[:, 0])//10))
+    hmin_slope_filtered = hmin_distance_filtered[np.where(hmin_distance_filtered[:, 0] == np.max(hmin_distance_filtered[:, 0]))[0]]
+    hmin_partner = hmin_slope_filtered[np.argmax(hmin_slope_filtered[:, 1])][2:]
+    
+    #######################################
+    #Sort between top left and bottom left#
+    #######################################
+    if hmin[1] < hmin_partner[1]:
+        tl = hmin
+        bl = hmin_partner
+    else:
+        tl = hmin_partner
+        bl = hmin
+        
+    ##############################################################################
+    #The lowest and highest x values should be corners, but we need to break ties#
+    ##############################################################################
+    hmax_idxs = np.where(hull_pts[:, 0] == amax)[0]
+    if len(hmax_idxs) == 1:
+        hmax = hull_pts[hmax_idxs]
+    else:
+        ##########################################################################
+        #Find the point with the highest x that also is closest to a right corner#
+        ##########################################################################
+        hmaxs = hull_pts[hmax_idxs]
+        distances = [min(((pt - top_right)**2).sum(axis = 0), ((pt - bottom_right)**2).sum(axis = 0)) for pt in hmaxs]
+        hmax = hmaxs[np.argmin(distances)]
+    if len(hmax) != 2:
+        raise ValueError("Panorama corners were estimated poorly because corner had wrong dimensions")
+    ###############################################################
+    #Get slope and distance between hmax and all other hull points#
+    ###############################################################
+    hmax_vectors = np.array([[abs((pt[1] - hmax[1])/(pt[0] - hmax[0] + 0.1)),
+                              ((pt[1] - hmax[1])**2 + (pt[0] - hmax[0])**2)**0.5,
+                              pt[0], pt[1] ] for pt in hull_pts])
+    
+    ############################################################################
+    #First filter out any points that are too close or too far to be considered#
+    ############################################################################
+    hmax_distance_filtered = hmax_vectors[np.where((hmax_vectors[:, 1] > distance_min) & (hmax_vectors[:, 1] < distance_max))[0]]
+    if len(hmax_distance_filtered) == 0:
+        raise ValueError("Panorama corners were estimated poorly because the identified corners were too close or too far")
+        
+    ###########################################################
+    #Round the slopes so that small differences are minimized #
+    #then of the points with the highest slope, choose the one#
+    #that is furthest from hmax                               #
+    ###########################################################
+    hmax_distance_filtered[:, 0] = hmax_distance_filtered[:, 0]//(1 + (np.max(hmax_distance_filtered[:, 0])//10))
+    hmax_slope_filtered = hmax_distance_filtered[np.where(hmax_distance_filtered[:, 0] == np.max(hmax_distance_filtered[:, 0]))[0]]
+    hmax_partner = hmax_slope_filtered[np.argmax(hmax_slope_filtered[:, 1])][2:]
+    
+    #########################################
+    #Sort between top right and bottom right#
+    #########################################
+    if hmax[1] < hmax_partner[1]:
+        tr = hmax
+        br = hmax_partner
+    else:
+        tr = hmax_partner
+        br = hmax 
+    closest_corners = np.array([tl, tr, br, bl], dtype = int)
     return closest_corners
 
 def make_spline(pts, spline_pts):
@@ -1640,7 +1736,7 @@ def mask_anchor_images(img, config):
     ##################################################
     image = cv2.copyMakeBorder(img, 100, 100, 100, 100, cv2.BORDER_CONSTANT) #add padding for corner finding
     thresh = threshold_image(image, 0, 0)
-    (top_left, top_right, bottom_right, bottom_left) = find_pano_corners(thresh, False, config)
+    (top_left, top_right, bottom_right, bottom_left) = find_pano_corners(thresh, config)
 
     ################################################################
     #Estimate the anchor image orientations by the vertical borders#
@@ -1874,7 +1970,7 @@ def straighten_mosaic(img, config):
     #Pad the images and threshold to make a mask of the panorama
     image = cv2.copyMakeBorder(img, 10, 10, 10, 10, cv2.BORDER_CONSTANT) #add padding for corner finding
     thresh = threshold_image(image, 10, 0)
-    corners = find_pano_corners(thresh, False, config)
+    corners = find_pano_corners(thresh, config)
 
     ##########################
     #Calculate spline points#
