@@ -1,11 +1,11 @@
 ################
 #Basic Settings#
 ################
-parent_directory: D:\\Tests\\B25\\
+image_directory: "D:\\Tests\\B25\\07_11_2024_B25"
 stitching_direction: "LEFT" #("LEFT", "RIGHT", "UP", "DOWN") #LEFT for Monopod and Amiga, UP for T4
 mask: [0, 0, 420, 0] #Pixels to remove from original image edges [left edge, right edge, top edge, bottom edge]
 #Monopod: [0, 0, 0, 0]; Amiga: [0, 0, 420, 0]; T4: [640, 640, 0, 0]
-forward_limit: 3 #integer, should be adjusted based on overlap between subsequent images, 5 for Monopod, 4 for Amiga and 3 for T4
+forward_limit: 4 #integer, should be adjusted based on overlap between subsequent images, 5 for Monopod, 4 for Amiga and 3 for T4
 max_reprojection_error: 1.0 # float, 1.0-5.0 is recommended, should go up with higher resolution images, 3 for Monopod, 0.5, 1.0 for Amiga and T4
 device: "cuda"  #Use "cuda" for GPU, "cpu" for single processor or "multiprocessing" for parallel CPUs, specify CPU count as second argument
 
@@ -20,12 +20,12 @@ final_size: [71628, 0] #[width, height] pixel dimensions where width is the dime
 crop_size: 0 #integer, if the free dimension in final size should be cropped or padded to a specific pixel dimension, 0 for nothing
 save_low_resolution: True #True or False
 low_resolution: 0.1 #downscaling factor, float
-save_output: False #True or False if False, delete intermediate files after finishing
+save_output: True #True or False if False, delete intermediate files after finishing
 
 ###################
 #Advanced Settings#
 ###################
-verbose: False #True or False, log and print detailed information during the stitching process, otherwise just warnings
+verbose: True #True or False, log and print detailed information during the stitching process, otherwise just warnings
 batch_size: 10 #integer, 10-20 is recommended, large batch sizes increase total run time
 keypoint_prop: 0.5 #Should by multiple of 0.1, float in range 0.1 to 1.0 
 xy_ratio: 0.75 #float, #minimum direction of travel/normal direction of travel in homography

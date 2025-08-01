@@ -927,6 +927,8 @@ def check_panorama(panorama, config):
         bottom_length = bottom_right[0] - bottom_left[0]
         left_height = bottom_left[1] - top_left[1]
         right_height = bottom_right[1] - top_right[1]
+        #Check if the left edge is angled too much, which may make stitching to the next batch hard
+        left_edge_slope = abs((top_left[1] - bottom_left[1])/((top_left[0] - bottom_left[0] + 0.01)))
         if top_length <= bottom_length:
             top_rhombus = top_length/bottom_length
         else:
@@ -953,7 +955,11 @@ def check_panorama(panorama, config):
     #Report whether the panorama passed the check#
     ##############################################
     if len(contours) == 1 and (dim_ratio <= 1.5 and rhombus >= 0.67):
-        return True
+        """"IN FUTURE USE THIS CHECK TO CHANGE START IDX OF NEXT BATCH"""
+        if left_edge_slope <= 1:
+            return True
+        else:
+            return True
     else:
         if len(contours) > 1.0:
             config["logger"].info("Panorama is not continuous!")
@@ -1881,7 +1887,7 @@ def warp_slice(img, slice_corners, width, height, registration_dict, keys, offse
     #Resize the slice so it is in its in a rectangular bounding box
     rect_mask_corners = np.where(rect_mask == 255)
     maxy, maxx, miny, minx = np.max(rect_mask_corners[0]), np.max(rect_mask_corners[1]), np.min(rect_mask_corners[0]),  np.min(rect_mask_corners[1])
-    rect_mask_bb = rect_img[miny:maxy, minx:maxx]
+    rect_mask_bb = rect_img[miny:maxy + 1, minx:maxx + 1]
     #Get target points for a normal rectangle
     rect_points = np.array([[0, 0], [width, 0], [width, height], [0, height]])
     #Translate the corners for a bounding box with top left corner at 0, 0
@@ -1910,6 +1916,8 @@ def warp_mosaic(img, all_corners, rectangular_width, rectangular_height, widths,
     #Link registration points with warp slices#
     ###########################################
     registration_dict = config["registration"]
+    #Remove keys that are sliced out when anchoring the batch
+    registration_dict = {key:val for key, val in registration_dict.items() if ((val[0] >= all_corners[0, 0, 0]) & (val[0] <= all_corners[-1, 1, 0]))}
     img_keys = list(registration_dict.keys())
     positions = np.array(list(registration_dict.values())).copy()
     x_positions = positions[:,0]
@@ -1921,7 +1929,8 @@ def warp_mosaic(img, all_corners, rectangular_width, rectangular_height, widths,
     #Blank canvas to project warped slices into
     blank = np.zeros((rectangular_height, rectangular_width, 3))
     for i in range(len(widths)):
-        key_idxs = np.where((x_positions >= cumulative_widths[i]) & (x_positions < cumulative_widths[i + 1]))[0]
+        """Since slicing off ends of batch sometimes, the included keypoints must be ones within the slice domain """
+        key_idxs = np.where((x_positions >= all_corners[i, 0, 0]) & (x_positions <= all_corners[i, 1, 0]))[0]
         keys = [img_keys[i] for i in key_idxs]
         #Corners of the sliced quadrilateral with top left, top right, bottom right, bottom left
         corners, width, offset = all_corners[i], widths[i], cumulative_widths[i]
@@ -1935,19 +1944,21 @@ def warp_batch(img, corners, widths, heights, batch, config):
     ###########################################
     my_batch = list(config["registration"].keys())[batch]
     registration_dict = config["registration"][my_batch]
+    #Remove keys that are sliced out when anchoring the batch
+    registration_dict = {key:val for key, val in registration_dict.items() if ((val[0] >= corners[0, 0, 0]) & (val[0] <= corners[-1, 1, 0]))}
     img_keys = list(registration_dict.keys())
     positions = np.array(list(registration_dict.values())).copy()
     x_positions = positions[:,0]
     cumulative_widths = np.append(np.array([0]), np.cumsum(widths)).astype(int)
     median_ht = int(np.median(heights))
-    
+
     ###########################
     #Warp and place each slice#
     ###########################
     #Blank canvas to project warped slices into
     blank = np.zeros((median_ht, np.sum(widths), 3))
     for i in range(len(widths)):
-        key_idxs = np.where((x_positions >= cumulative_widths[i]) & (x_positions < cumulative_widths[i + 1]))[0]
+        key_idxs = np.where((x_positions >= corners[i, 0, 0]) & (x_positions <= corners[i, 1, 0]))[0]
         keys = [img_keys[i] for i in key_idxs]
         #Corners of the sliced quadrilateral with top left, top right, bottom right, bottom left
         warped = warp_slice(img, corners[i], widths[i], median_ht, registration_dict, keys, cumulative_widths[i], config)
@@ -2118,7 +2129,7 @@ def resize_panorama(panorama, config):
     else:
         scalex, scaley, padx, pady = width/panorama.shape[1], height/panorama.shape[0], 0, 0
         final_size = cv2.resize(panorama, (width, height), interpolation=cv2.INTER_NEAREST)
-        
+
     return final_size, scalex, scaley, padx, pady
     
 def stitch_final_mosaic(config):
@@ -2138,6 +2149,7 @@ def stitch_final_mosaic(config):
     filenames = [os.path.basename(path) for path in sorted_batch_paths]
     num = np.array([int(file.split("_")[0]) for file in filenames])
     batch_imgs = [cv2.imread(batch_path) for batch_path in sorted_batch_paths]
+    
 
     #################################
     #Straighten and resize panoramas#
@@ -2183,15 +2195,18 @@ def stitch_final_mosaic(config):
     interbatch_registration = {}
     for image_name, corner in zip(np.sort(num), corners):
         interbatch_registration[image_name] = corner
+
     #Offset image registrations by the global corners of each batch
     #in the super panorama space and take out batch dimension
     global_registration = {}
     for batch, batch_dict in config["registration"].items():
         for image, point in batch_dict.items():
             global_point = point + interbatch_registration[batch]
+            #Note: since the first image in one batch is the last image of the last batch, this
+            #will overwrite the registration of the last images of each batch except the last one
             global_registration[image] = global_point
     config["registration"] = global_registration
-    
+        
     ###########################
     #Save final super panorama#
     ###########################
@@ -2563,6 +2578,7 @@ def run(config_path, cpu_count):
             ###############################################
             num_processes = min(cpu_count, len(subfolders))
             print("Proceeding with {} processes".format(num_processes))
+            multiprocessing.set_start_method('spawn') #Since we check number of devices before starting the processes, this is not fork safe
             with multiprocessing.Pool(processes = num_processes) as pool:
                 try:
                     results = pool.starmap(run_batches, zip(itertools.repeat(base_config), subfolders, itertools.repeat(parent_directory)))
